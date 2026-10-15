@@ -2,6 +2,8 @@
 
 这些函数同时供大模型（作为回答依据）与站内检索降级路径复用。
 """
+import time
+
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +12,26 @@ from app.models.collection import Collection
 
 # 工具结果会进 prompt，简介需要截断
 BRIEF_LEN = 120
+
+# board_games 全表的进程内 TTL 缓存：检索/识别/推荐在单次请求里会多次全表扫描，
+# 并发请求各自独立扫描；全表是只读参考数据，缓存 2 分钟即可把 DB 往返从每请求数次
+# 降到每 2 分钟一次，且管理端改库会在 TTL 内自愈。
+# 缓存的是「已脱离加载会话、但列值仍加载」的 ORM 实例（expunge 而非 expire），
+# 跨请求/跨会话读取列属性（BoardGame 无懒加载关系）安全，不会触发 DetachedInstanceError。
+_BOARD_GAMES_CACHE: dict = {'at': 0.0, 'rows': None}
+_BOARD_GAMES_TTL_SEC = 120.0
+
+
+async def all_board_games(db: AsyncSession) -> list[BoardGame]:
+    '''board_games 全表（按 id 排序）的进程内缓存版本，供检索/识别/推荐共用。'''
+    now = time.monotonic()
+    if _BOARD_GAMES_CACHE['rows'] is not None and now - _BOARD_GAMES_CACHE['at'] < _BOARD_GAMES_TTL_SEC:
+        return _BOARD_GAMES_CACHE['rows']
+    rows = (await db.execute(select(BoardGame).order_by(BoardGame.id))).scalars().all()
+    for r in rows:
+        db.expunge(r)  # 脱离会话但保留已加载的列值，便于跨请求安全复用
+    _BOARD_GAMES_CACHE.update({'at': now, 'rows': rows})
+    return rows
 
 
 def brief(g: BoardGame) -> dict:

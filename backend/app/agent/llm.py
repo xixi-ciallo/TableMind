@@ -16,6 +16,36 @@ import httpx
 
 from app.core.config import settings
 
+import logging
+
+log = logging.getLogger(__name__)
+
+# 复用的 httpx 异步客户端：连接池复用，避免每次请求新建连接的开销（httpx 官方推荐用法）。
+_httpx_client = None
+
+def _get_client() -> 'httpx.AsyncClient | None':
+    global _httpx_client
+    if _httpx_client is None or _httpx_client.is_closed:
+        _httpx_client = httpx.AsyncClient()
+    return _httpx_client
+
+# embedding 客户端（懒加载；未安装 openai 包时返回 None，embed 降级）。
+_embed_client = None
+
+def _get_embed_client():
+    global _embed_client
+    if _embed_client is None:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            return None
+        _embed_client = AsyncOpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL)
+    return _embed_client
+
+# embedding 结果缓存：同一查询串重复计算代价高（每次 RAG 检索都算），进程内复用。
+_embed_cache: dict = {}
+_EMBED_CACHE_MAX = 2000
+
 # 单条消息的角色
 Role = str
 
@@ -57,7 +87,7 @@ def _classify(status: int, body: str) -> LLMError:
     故先按响应体识别配额类错误，其余再按状态码归类。
     """
     blob = (body or "").lower()
-    if "freetieronly" in blob or "free quota" in blob or "quota" in blob and "exhaust" in blob:
+    if "freetieronly" in blob or "free quota" in blob or ("quota" in blob and "exhaust" in blob):
         return LLMError(
             "quota",
             f"大模型免费额度已耗尽（HTTP {status}，当前 LLM_MODEL={settings.LLM_MODEL}）："
@@ -125,12 +155,12 @@ async def chat_complete(
 
     timeout = httpx.Timeout(settings.LLM_TIMEOUT, connect=15)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                _endpoint(), headers=_headers(),
-                json=_payload(messages, temperature, max_tokens, False,
-                              model=model, enable_thinking=enable_thinking),
-            )
+        resp = await _get_client().post(
+            _endpoint(), headers=_headers(),
+            json=_payload(messages, temperature, max_tokens, False,
+                          model=model, enable_thinking=enable_thinking),
+            timeout=timeout,
+        )
     except httpx.TimeoutException:
         raise LLMError("timeout", "大模型响应超时")
     except httpx.HTTPError as e:
@@ -173,8 +203,7 @@ async def chat_with_tools(
 
     timeout = httpx.Timeout(settings.LLM_TIMEOUT, connect=15)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(_endpoint(), headers=_headers(), json=payload)
+        resp = await _get_client().post(_endpoint(), headers=_headers(), json=payload, timeout=timeout)
     except httpx.TimeoutException:
         raise LLMError("timeout", "大模型响应超时")
     except httpx.HTTPError as e:
@@ -218,21 +247,28 @@ async def embed(text: str) -> list[float] | None:
     """
     if not available():
         return None
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        return None
+    key = text[:8000]
+    cached = _embed_cache.get(key)
+    if cached is not None:
+        return cached
 
+    client = _get_embed_client()
+    if client is None:
+        return None
     try:
-        client = AsyncOpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL)
         dim = getattr(settings, "EMBEDDING_DIM", None)
         kwargs = {"dimensions": dim} if dim else {}
         resp = await client.embeddings.create(
-            model=settings.EMBEDDING_MODEL, input=text[:8000], **kwargs
+            model=settings.EMBEDDING_MODEL, input=key, **kwargs
         )
-        return list(resp.data[0].embedding)
+        vec = list(resp.data[0].embedding)
     except Exception:
         return None
+
+    if len(_embed_cache) >= _EMBED_CACHE_MAX:
+        _embed_cache.clear()
+    _embed_cache[key] = vec
+    return vec
 
 
 async def chat_stream(
@@ -252,52 +288,53 @@ async def chat_stream(
         raise LLMError("unconfigured", "未配置大模型密钥")
 
     timeout = httpx.Timeout(settings.LLM_TIMEOUT, connect=15)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        stream_payload = _payload(
-            messages, temperature, max_tokens, True,
-            model=model, enable_thinking=enable_thinking,
-        )
-        stream_payload["stream_options"] = {"include_usage": True}
-        try:
-            async with client.stream(
-                "POST",
-                _endpoint(),
-                headers=_headers(),
-                json=stream_payload,
-            ) as resp:
-                if resp.status_code != 200:
-                    body = (await resp.aread()).decode("utf-8", "ignore")
-                    raise _classify(resp.status_code, body)
+    client = _get_client()
+    stream_payload = _payload(
+        messages, temperature, max_tokens, True,
+        model=model, enable_thinking=enable_thinking,
+    )
+    stream_payload["stream_options"] = {"include_usage": True}
+    try:
+        async with client.stream(
+            "POST",
+            _endpoint(),
+            headers=_headers(),
+            json=stream_payload,
+            timeout=timeout,
+        ) as resp:
+            if resp.status_code != 200:
+                body = (await resp.aread()).decode("utf-8", "ignore")
+                raise _classify(resp.status_code, body)
 
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    line = line.strip()
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if not payload or payload == "[DONE]":
-                        if payload == "[DONE]":
-                            break
-                        continue
-                    try:
-                        chunk = json.loads(payload)
-                    except ValueError:
-                        continue
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    if payload == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    continue
 
-                    # 用量通常在最后一个空 choices 的 chunk 里
-                    if chunk.get("usage"):
-                        _log_usage("chat_stream", chunk["usage"])
+                # 用量通常在最后一个空 choices 的 chunk 里
+                if chunk.get("usage"):
+                    _log_usage("chat_stream", chunk["usage"])
 
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        reasoning = delta.get("reasoning_content")
-                        if reasoning:
-                            yield "reasoning", reasoning
-                        content = delta.get("content")
-                        if content:
-                            yield "content", content
-        except httpx.TimeoutException:
-            raise LLMError("timeout", "大模型响应超时")
-        except httpx.HTTPError as e:
-            raise LLMError("network", f"无法连接大模型服务：{e}")
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    reasoning = delta.get("reasoning_content")
+                    if reasoning:
+                        yield "reasoning", reasoning
+                    content = delta.get("content")
+                    if content:
+                        yield "content", content
+    except httpx.TimeoutException:
+        raise LLMError("timeout", "大模型响应超时")
+    except httpx.HTTPError as e:
+        raise LLMError("network", f"无法连接大模型服务：{e}")

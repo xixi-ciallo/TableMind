@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent import llm, rag
 from app.agent import loop as agent_loop
 from app.agent import memory as mem_mod
+from app.agent import tools as db_tools
 from app.core.config import settings
 from app.api.deps import get_current_user, get_db
 from app.models.board_game import BoardGame
@@ -153,7 +154,7 @@ async def _fallback_reply(db: AsyncSession, message: str, mode: str = "fast") ->
                     [f"《{game.name}》规则说明书原文摘录：", body, FALLBACK_RULE_TIP]
                 )
 
-    games = (await db.execute(select(BoardGame).order_by(BoardGame.id))).scalars().all()
+    games = await db_tools.all_board_games(db)
     if not games:
         return "本站还没有收录桌游数据，暂时无法为你检索。"
 

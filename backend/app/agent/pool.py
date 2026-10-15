@@ -40,8 +40,18 @@ def mark_for(chunks: int) -> str:
     return RULE_MARK_YES if chunks > 0 else RULE_MARK_NO
 
 
+_rules_coverage_cache: dict = {'at': 0.0, 'cov': None}
+_RULE_COVERAGE_TTL_SEC = 120.0
+
 async def rules_coverage(db) -> dict[int, int]:
-    """game_id → 规则切片数（全表一次分组查询，47 行，开销极小）。"""
+    """game_id → 规则切片数（全表一次分组查询，47 行，开销极小）。
+
+    结果近乎静态（规则切片不常变），进程内缓存 2 分钟，避免单次推荐请求里
+    pool_stats / load_pool / game_focus_stream 各查一次。
+    """
+    now = time.monotonic()
+    if _rules_coverage_cache['cov'] is not None and now - _rules_coverage_cache['at'] < _RULE_COVERAGE_TTL_SEC:
+        return _rules_coverage_cache['cov']
     rows = (
         await db.execute(
             select(RuleDocument.game_id, func.count(RuleDocument.id)).group_by(
@@ -49,7 +59,9 @@ async def rules_coverage(db) -> dict[int, int]:
             )
         )
     ).all()
-    return {int(gid): int(n) for gid, n in rows}
+    cov = {int(gid): int(n) for gid, n in rows}
+    _rules_coverage_cache.update({'at': now, 'cov': cov})
+    return cov
 
 
 async def pool_stats(db) -> dict:

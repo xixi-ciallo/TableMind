@@ -16,4 +16,4 @@
   5. **大模型调用与工程化治理**：选用百炼 DashScope 推理模型（OpenAI 兼容端点，流式 reasoning_content + content 分离，思维链计入 max_tokens），统一模型抽象层；建立降级与缓存开关（AGENT_ENABLED / MEMORY_DISTILL_ENABLED / AI_CANARY_RATIO / ANSWER_CACHE_ENABLED 可配置），同列向量禁混模型、换模型须全量重算，保障嵌入一致性。
   6. **工程质量与部署**：制定零数据虚构原则（无来源字段如实标注、不估算），编写 regression_rag.py 回归脚本验证检索与问答链路；通过 Docker 实现一键部署，前端以 React 18 + TypeScript + Ant Design 构建双端应用，并基于 ECharts 输出管理端数据看板（核心指标卡片 + 近 30 天趋势）。
 
-- **项目成果**：独立完成桌游平台的架构设计、前后端编码、AI 链路调优与部署上线全流程；RAG 规则问答检索命中率 hit@3 达 88.9%、hit@5 达 96.0%，AI 助手实现规则问答与个性化推荐双场景落地，形成可复用的「垂直领域知识库 + Agent」全栈解决方案。
+- **项目成果**：独立完成全栈交付，覆盖 47 款桌游、1300+ 规则切片全量入库；规则问答 RAG 检索 hit@5 达 96.0%，模型降级时仍返规则原文、**永不空答**；Docker 一键部署，配套 L1–L7 回归脚本保障无退化。

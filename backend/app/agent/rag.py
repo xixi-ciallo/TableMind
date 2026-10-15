@@ -129,7 +129,7 @@ async def retrieve(db: AsyncSession, message: str, limit: int = 8) -> tuple[list
     返回 (资料列表, 检索方式说明)，供上下文与降级文案使用。
     """
     # 1) 命中游戏名（含英文名）
-    all_games = (await db.execute(select(BoardGame).order_by(BoardGame.id))).scalars().all()
+    all_games = await tools.all_board_games(db)
     hits = [g for g in all_games if (g.name and g.name in message) or (g.name_en and g.name_en in message)]
     if hits:
         return [tools.brief(g) for g in hits[: max(1, limit)]], "game_name"
@@ -254,9 +254,7 @@ async def identify_game(db: AsyncSession, message: str) -> BoardGame | None:
     - 按长度排序：提问「七大奇迹对决」命中的是对决版，不会被短的「七大奇迹」抢先；
     - 副标题简称：提问「阿瓦隆怎么玩」命中《抵抗组织：阿瓦隆》。
     """
-    cands = _match_games(
-        (await db.execute(select(BoardGame).order_by(BoardGame.id))).scalars().all(), message
-    )
+    cands = _match_games(await tools.all_board_games(db), message)
     return cands[0][2] if cands else None
 
 
@@ -269,9 +267,7 @@ async def identify_games(db: AsyncSession, message: str) -> list[BoardGame]:
     注意：调用方应先用「确实在问某款/某几款游戏」的信号兜住，再调用本函数——
     短副标题（如「阿瓦隆」3 字）在通用句里也可能被误命中。
     """
-    cands = _match_games(
-        (await db.execute(select(BoardGame).order_by(BoardGame.id))).scalars().all(), message
-    )
+    cands = _match_games(await tools.all_board_games(db), message)
     return [g for _, _, g in cands]
 
 

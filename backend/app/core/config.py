@@ -59,3 +59,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+import logging
+
+_log = logging.getLogger(__name__)
+if settings.SECRET_KEY == 'change-me-in-production':
+    _log.critical(
+        'SECRET_KEY 仍是默认值 change-me-in-production！任何人都可伪造 JWT，鉴权形同虚设；'
+        '请立即在 .env 中设置一个强随机值。'
+    )
