@@ -1,0 +1,62 @@
+# ============ 依赖 ============
+node_modules/
+**/node_modules/
+.pnp/
+.pnp.js
+
+# ============ 构建产物 ============
+dist/
+build/
+out/
+**/dist/
+*.tsbuildinfo
+*.map
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ============ 环境变量 / 密钥 ============
+# 真实密钥文件不入库，仅保留 .env.example
+.env
+.env.*
+!.env.example
+*.local
+
+# ============ 本地工具数据 ============
+.workbuddy/
+.trae/
+.claude/
+
+# ============ 日志 ============
+*.log
+logs/
+
+# ============ 数据库数据文件（便携 PG/Redis 不在版本库内）============
+pgdata/
+*.db
+*.sqlite
+*.sqlite3
+redis-data/
+dump*.rdb
+
+# ============ 系统 / 编辑器 ============
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+
+# ============ 前端构建备份目录 ============
+dist_bak_*/
+dist_old_*/
+**/dist_bak_*/
+**/dist_old_*/
+
+# ============ 临时中间文件 ============
+_tmp_*.json

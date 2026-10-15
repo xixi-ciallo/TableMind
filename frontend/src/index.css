@@ -1,0 +1,596 @@
+/* ============================================================================
+ * TableMind 设计系统（参考 TapTap 网页版的卡片化版式与暖色主色）
+ *
+ * 分层：原始令牌(本文件 :root) -> 语义变量 -> 组件使用
+ * 所有承载白色文字的色值都经过对比度实测，满足 WCAG AA（>= 4.5:1）。
+ * ========================================================================== */
+
+:root {
+  /* —— 品牌色：TapTap 式珊瑚暖色 —— */
+  /* 装饰用品牌色：渐变 / 图标 / 大面积色块，不承载白色文字 */
+  --tm-brand: #ff6b45;
+  --tm-brand-light: #ff8f6d;
+
+  /* 交互主色：按钮、选中态，白字对比度 4.53:1 ✅ AA */
+  --tm-action: #d93d1a;
+  --tm-action-hover: #c43715; /* 5.38:1 */
+  --tm-action-active: #a82c0b; /* 6.93:1 */
+
+  /* 文字 / 链接色：白底 5.38:1 ✅ AA */
+  --tm-link: #c43715;
+
+  /* 评分色：暖色数字（TapTap 用暖色展示评分） */
+  --tm-rating: #d93d1a;
+
+  /* 浅色底：标签、提示块、选中背景 */
+  --tm-tint: #fff2ee;
+  --tm-tint-strong: #ffe3db;
+
+  /* 次要信息色：信息标签、AI 相关元素 */
+  --tm-info: #0e7fb8;
+  --tm-info-tint: #eaf5fc;
+
+  /* 警示色：删除 / 影响面提示（白底 4.6:1 ✅ AA） */
+  --tm-warn: #b45309;
+  --tm-warn-tint: #fef6e7;
+
+  /* —— 文字 —— */
+  --tm-text-primary: #1a1a1a;
+  --tm-text-secondary: #6b7280; /* 白底 4.83:1 ✅ */
+  --tm-text-tertiary: #9ca3af; /* 仅装饰性文字 */
+
+  /* —— 表面 —— */
+  --tm-surface-page: #f6f7f9;
+  --tm-surface-card: #ffffff;
+  --tm-border: #eef0f3;
+  --tm-border-strong: #e3e6ea;
+
+  /* —— 圆角 —— */
+  --tm-radius-sm: 8px;
+  --tm-radius-md: 12px;
+  --tm-radius-lg: 16px;
+  --tm-radius-xl: 20px;
+  --tm-radius-pill: 999px;
+
+  /* —— 阴影：分层柔和，hover 时抬升 —— */
+  --tm-shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.04);
+  --tm-shadow-card: 0 2px 8px rgba(17, 24, 39, 0.06);
+  --tm-shadow-hover: 0 10px 28px rgba(17, 24, 39, 0.13);
+  --tm-shadow-action: 0 6px 18px rgba(217, 61, 26, 0.28);
+
+  /* —— 动效：统一缓动，保证手感一致 —— */
+  --tm-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --tm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --tm-dur-fast: 140ms;
+  --tm-dur: 220ms;
+  --tm-dur-slow: 380ms;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Helvetica Neue', Arial, sans-serif;
+  color: var(--tm-text-primary);
+  background: var(--tm-surface-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+img {
+  /* 图片解码期间不阻塞主线程，滚动更顺滑 */
+  content-visibility: auto;
+}
+
+/* —— 滚动条：细窄、低干扰 —— */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d3d8de transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d3d8de;
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #b9c0c9;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* —— 键盘焦点可见性 —— */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+[role='button']:focus-visible,
+[role='link']:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--tm-action);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ============================================================================
+ * 交互手感：卡片抬升 + 按压反馈（纯 CSS，避免 JS 改内联样式导致的抖动）
+ * ========================================================================== */
+
+/* 可点击卡片：hover 轻抬 + 阴影加深 */
+.tm-card {
+  transition:
+    transform var(--tm-dur) var(--tm-ease),
+    box-shadow var(--tm-dur) var(--tm-ease),
+    border-color var(--tm-dur) var(--tm-ease);
+  will-change: transform;
+}
+.tm-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--tm-shadow-hover);
+}
+.tm-card:active {
+  transform: translateY(-1px) scale(0.994);
+  transition-duration: var(--tm-dur-fast);
+}
+
+/* 横向滑动卡片：hover 只做轻微抬升，避免横向抖动 */
+.tm-card-x:hover {
+  transform: translateY(-3px);
+}
+
+/* 卡片内图片：hover 时轻微放大，营造聚焦感 */
+.tm-card .tm-zoom {
+  transition: transform 420ms var(--tm-ease-out);
+}
+.tm-card:hover .tm-zoom {
+  transform: scale(1.05);
+}
+
+/* TapTap 式侧边栏导航项：hover 浅灰圆角、选中态灰胶囊（背景交给 CSS，避免内联样式挡住 hover） */
+.tm-nav-item {
+  background: transparent;
+}
+.tm-nav-item:hover {
+  background: #f4f5f7;
+}
+.tm-nav-item.tm-nav-active,
+.tm-nav-item.tm-nav-active:hover {
+  background: #f3f4f6;
+}
+
+/* 排行榜：榜单卡内独立滚动区（默认展示 10 行，向下滚动查看其余） */
+.tm-rank-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #d9dde3 transparent;
+}
+.tm-rank-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.tm-rank-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tm-rank-scroll::-webkit-scrollbar-thumb {
+  background: #d9dde3;
+  border-radius: 999px;
+}
+.tm-rank-scroll::-webkit-scrollbar-thumb:hover {
+  background: #c2c7cf;
+}
+
+/* 榜单行右侧「查看」按钮：默认隐藏，鼠标悬停该行时才出现 */
+.tm-rank-btn {
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+.tm-rank-row:hover .tm-rank-btn,
+.tm-rank-row:focus-visible .tm-rank-btn {
+  opacity: 1;
+}
+/* 触屏设备没有 hover，直接常显，避免按钮永远看不到 */
+@media (hover: none) {
+  .tm-rank-btn {
+    opacity: 1;
+  }
+}
+
+/* AI 助手左栏「历史会话」：删除按钮默认隐藏，悬停该行才显形 */
+.tm-hist-del {
+  opacity: 0.28; /* 常显一个很淡的提示，悬停后才完全显形 */
+  transition: opacity 0.16s ease;
+}
+.tm-hist-row:hover .tm-hist-del,
+.tm-hist-row:focus-within .tm-hist-del,
+.tm-hist-del:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .tm-hist-del {
+    opacity: 0.75;
+  }
+}
+
+/* 通用按压反馈：按钮、小卡片 */
+.tm-press {
+  transition:
+    transform var(--tm-dur-fast) var(--tm-ease),
+    background-color var(--tm-dur-fast) var(--tm-ease),
+    box-shadow var(--tm-dur-fast) var(--tm-ease),
+    color var(--tm-dur-fast) var(--tm-ease);
+}
+.tm-press:active {
+  transform: scale(0.96);
+}
+
+/* ============================================================================
+ * 页面入场：轻量淡入上移，营造顺滑的切换感
+ * ========================================================================== */
+@keyframes tm-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.tm-page-enter {
+  animation: tm-fade-up var(--tm-dur-slow) var(--tm-ease-out) both;
+}
+
+/* 详情页头图：悬停时浮出放大提示 */
+.hero-zoom-mask {
+  pointer-events: none;
+}
+.hero-zoom-mask:hover,
+button:focus-visible > .hero-zoom-mask {
+  opacity: 1;
+}
+
+/* 纯淡入（灯箱 / 弹层遮罩使用） */
+@keyframes tm-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.tm-fade-in {
+  animation: tm-fade-in var(--tm-dur) var(--tm-ease-out) both;
+}
+
+/* 图片加载完成的淡入 */
+@keyframes tm-img-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.tm-img {
+  animation: tm-img-in var(--tm-dur-slow) var(--tm-ease-out) both;
+}
+
+/* ============================================================================
+ * 发帖编辑器：块行 + 悬停显形手柄；行内链接 / 话题标签
+ * ========================================================================== */
+.tm-blk-row .tm-gutter-btn {
+  opacity: 0;
+  transition: opacity 0.15s var(--tm-ease);
+}
+.tm-blk-row:hover .tm-gutter-btn,
+.tm-blk-row:focus-within .tm-gutter-btn {
+  opacity: 1;
+}
+@media (hover: none) {
+  .tm-blk-row .tm-gutter-btn {
+    opacity: 0.9;
+  }
+}
+.tm-inline-link {
+  color: var(--tm-action);
+  text-decoration: none;
+}
+.tm-inline-link:hover {
+  text-decoration: underline;
+}
+.tm-inline-topic {
+  color: var(--tm-action);
+  font-weight: 700;
+}
+
+/* + 命令菜单：行内按钮与子面板 */
+.tm-palette-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tm-palette-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--tm-text-primary);
+  text-align: left;
+  transition: background-color 0.12s var(--tm-ease);
+}
+.tm-palette-item:hover {
+  background: var(--tm-tint);
+}
+.tm-palette-ico {
+  font-size: 16px;
+  color: var(--tm-text-secondary);
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.tm-palette-back {
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--tm-text-secondary);
+}
+.tm-palette-back:hover {
+  background: var(--tm-tint);
+}
+.tm-palette-filter {
+  font-size: 12px;
+  color: var(--tm-text-tertiary);
+  padding: 2px 10px 6px;
+}
+.tm-palette-empty {
+  padding: 10px;
+  font-size: 13px;
+  color: var(--tm-text-tertiary);
+  text-align: center;
+}
+/* 块菜单里的快捷键小徽标（ModD / ModC / Backspace） */
+.tm-kbd {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tm-text-secondary);
+  background: #f0f1f3;
+  border-radius: 5px;
+  padding: 2px 7px;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+
+/* ============================================================================
+ * 发布页交互按钮效果：「+」菜单钮 / ⠿ 手柄钮 / 添加头图·视频
+ * ========================================================================== */
+.tm-plus-btn {
+  background: #edeef1;
+  color: var(--tm-text-secondary);
+  transition:
+    background-color 0.15s var(--tm-ease),
+    color 0.15s var(--tm-ease),
+    box-shadow 0.15s var(--tm-ease),
+    transform 0.15s var(--tm-ease);
+}
+.tm-plus-btn:hover {
+  background: #e1e2e6;
+}
+.tm-plus-btn.is-active {
+  background: var(--tm-action);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(217, 58, 26, 0.32);
+}
+
+.tm-handle-btn {
+  color: var(--tm-text-tertiary);
+  transition:
+    color 0.15s var(--tm-ease),
+    transform 0.15s var(--tm-ease);
+}
+.tm-handle-btn:hover {
+  color: var(--tm-action);
+  transform: translateY(-1px);
+}
+.tm-handle-btn.is-active {
+  color: var(--tm-action);
+}
+
+.tm-add-btn {
+  transition:
+    background-color 0.15s var(--tm-ease),
+    color 0.15s var(--tm-ease),
+    transform 0.15s var(--tm-ease);
+}
+.tm-add-btn:hover {
+  background: var(--tm-tint-strong);
+}
+.tm-add-btn:hover .tm-add-ico {
+  background: var(--tm-action);
+  color: #fff;
+}
+.tm-add-btn:hover .tm-add-txt {
+  color: var(--tm-action);
+}
+.tm-add-ico {
+  transition:
+    background-color 0.15s var(--tm-ease),
+    color 0.15s var(--tm-ease);
+}
+.tm-add-txt {
+  transition: color 0.15s var(--tm-ease);
+}
+
+/* ── 顶栏头像 hover 弹层的可点项 ─────────────────────────── */
+.tm-pop-item {
+  transition: background-color 0.15s var(--tm-ease);
+}
+.tm-pop-item:hover {
+  background: #f5f6f8;
+}
+
+/* ── 详情页头图轮播（左右翻页箭头 + 圆点指示器） ───────────── */
+.tm-header-carousel {
+  scroll-behavior: smooth;
+  -ms-overflow-style: none;
+}
+.tm-header-carousel::-webkit-scrollbar {
+  display: none; /* Chrome/Edge 隐藏滚动条，靠箭头/圆点翻页 */
+}
+.tm-car-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 2;
+  transition: background-color 0.15s var(--tm-ease), transform 0.12s var(--tm-ease);
+}
+.tm-car-btn:hover {
+  background: rgba(0, 0, 0, 0.72);
+}
+.tm-car-btn:active {
+  transform: translateY(-50%) scale(0.92);
+}
+.tm-car-prev {
+  left: 10px;
+}
+.tm-car-next {
+  right: 10px;
+}
+.tm-car-dots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  z-index: 2;
+  pointer-events: none; /* 容器不挡图片点击（开灯箱），仅圆点可点 */
+}
+.tm-car-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  pointer-events: auto;
+  transition:
+    background-color 0.15s var(--tm-ease),
+    transform 0.15s var(--tm-ease),
+    width 0.15s var(--tm-ease);
+}
+.tm-car-dot.is-active {
+  background: #fff;
+  width: 18px;
+}
+
+/* ============================================================================
+ * 骨架屏：加载占位的高光扫过动画
+ * ========================================================================== */
+@keyframes tm-shimmer {
+  0% {
+    background-position: -420px 0;
+  }
+  100% {
+    background-position: 420px 0;
+  }
+}
+.tm-skeleton {
+  background:
+    linear-gradient(90deg, #eceff2 0%, #f6f8fa 50%, #eceff2 100%) 0 0 / 420px 100% no-repeat,
+    #eceff2;
+  animation: tm-shimmer 1.25s linear infinite;
+  border-radius: var(--tm-radius-sm);
+}
+
+/* ============================================================================
+ * 工具类
+ * ========================================================================== */
+
+/* 横向滚动区右侧渐隐，提示还有更多内容 */
+.tm-scroll-fade {
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 56px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 56px), transparent 100%);
+}
+
+/* 横向滚动条隐藏（保留滚动能力） */
+.tm-scroll-x {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tm-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+.tm-clamp-1,
+.tm-clamp-2,
+.tm-clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tm-clamp-1 {
+  -webkit-line-clamp: 1;
+}
+.tm-clamp-2 {
+  -webkit-line-clamp: 2;
+}
+.tm-clamp-3 {
+  -webkit-line-clamp: 3;
+}
+
+/* 尊重用户的减弱动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+  .tm-card:hover,
+  .tm-card-x:hover {
+    transform: none;
+  }
+}
