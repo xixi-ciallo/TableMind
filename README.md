@@ -114,6 +114,7 @@ npm run dev                            # 开发服务器默认 http://localhost:
 | `LLM_API_KEY` / `LLM_BASE_URL` | 百炼 DashScope 凭证与兼容端点 |
 | `EMBEDDING_MODEL` | 嵌入模型（需与 `rule_documents.embedding` 向量维度一致，默认 1536） |
 | `AGENT_ENABLED` / `MEMORY_DISTILL_ENABLED` / `ANSWER_CACHE_ENABLED` | 功能与成本开关 |
+| `RERANK_ENABLED` / `RERANK_TOP_N` / `RERANK_METHOD` | 检索重排序（默认关）：开启后对融合排序前 15 个切片由 LLM 打分精排 |
 
 ---
 

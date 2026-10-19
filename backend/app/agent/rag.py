@@ -343,6 +343,19 @@ async def retrieve_rule_chunk_hits(
     else:
         order = _hybrid_order(vec_scores, bm_scores, _section_boost(docs, query))
 
+    # ---- 可选 Rerank 阶段（默认关闭）：融合后再精细排序，纠正难例 ----
+    # 仅对前 RERANK_TOP_N 个候选打分重排，其余保持原序追加在后；任何异常回落融合顺序。
+    if settings.RERANK_ENABLED and len(order) > k:
+        try:
+            from app.agent import rerank as _rerank
+
+            cands = [(order[i], docs[order[i]]) for i in range(min(settings.RERANK_TOP_N, len(order)))]
+            reranked = await _rerank.rerank_rule_chunks(query, cands, method=settings.RERANK_METHOD)
+            reranked_idx = [i for i, _ in reranked]
+            order = reranked_idx + order[len(reranked_idx):]
+        except Exception as e:  # noqa: BLE001
+            log.warning("Rerank 阶段异常，回落融合顺序：%s", e)
+
     picked = order[:k]
     if expand > 0:
         keep: set[int] = set()

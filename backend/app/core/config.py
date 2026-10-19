@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # 灰度：按概率把流量从 Agent(路由+流水线) 切到固定 RAG 路径，用于对比延迟/准确率
     # 0=全走 Agent，1=全走固定 RAG
     AI_CANARY_RATIO: float = 0.0
+    # 可选重排（Rerank）阶段：在混合检索融合之后、取 Top-K 之前再精细排序。
+    # 默认关闭——规则化融合在单款游戏规则书切片上已够用；开启会为前 RERANK_TOP_N 段
+    # 各调一次 LLM 打分，用于措辞差异大或跨多款游戏的难例纠正。任何异常都回落融合顺序。
+    RERANK_ENABLED: bool = False
+    RERANK_TOP_N: int = 15
+    RERANK_METHOD: str = "llm"  # llm=大模型点式打分；score=调用方已有权重时按分数重排
     # 是否在日志里记录每次 LLM 调用的 token 用量（用于成本计量）
     LLM_LOG_USAGE: bool = True
 
