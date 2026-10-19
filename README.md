@@ -74,11 +74,23 @@ cp .env.example .env
 ```bash
 cd backend
 pip install -r requirements.txt        # 或所用依赖管理
-alembic upgrade head                   # 应用数据库迁移
+alembic upgrade head                   # 建表（迁移会自动 CREATE EXTENSION vector）
 PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 4. 前端
+> 若使用非 pgvector 官方镜像的 PostgreSQL，请先在目标库执行 `CREATE EXTENSION vector`（需实例已安装 pgvector 扩展包），否则迁移报 `type "vector" does not exist`。
+
+### 4. 初始化数据（管理员 + 桌游库）
+
+```bash
+cd backend
+python seed_admin.py                   # 创建管理员账号 admin（幂等）
+python seed_catalog.py                 # 导入 47 款桌游（数据来自 backend/data/catalog.json，幂等）
+```
+
+> **规则问答语料**（规则书切片与向量）不随仓库分发：登录管理端后通过 `POST /api/admin/games/{id}/rule-docs` 上传规则书，系统自动 OCR → 切片 → 向量化。规则书页面图片已随仓库放在 `frontend/public/rules/`。
+
+### 5. 前端
 
 ```bash
 cd frontend
@@ -108,8 +120,7 @@ npm run dev                            # 开发服务器默认 http://localhost:
 ## 🧪 质量保障
 
 - **零数据虚构原则**：无来源字段如实标注、不估算。
-- `regression_rag.py`：检索与问答链路回归脚本，保障改动无退化。
-- 同列向量禁混模型，换嵌入模型须全量重算（`reembed_all.py`）。
+- 同列向量禁混模型，换嵌入模型须全量重算（管理端 `POST /api/admin/games/{id}/rule-docs/reembed`）。
 
 ---
 

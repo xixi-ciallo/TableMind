@@ -1,7 +1,7 @@
 """把真实采集的 51 款桌游灌入 board_games，并生成一批演示玩家评分。
 
 用途：
-  1) 桌游数据来自 .workbuddy/tmp/catalog.json（BGG 接口真实采集，非虚构）；
+  1) 桌游数据来自 backend/data/catalog.json（BGG 接口真实采集，随仓库分发，非虚构）；
   2) 评分用于「本站玩家评分排行榜」。由于系统刚上线没有真实玩家评分，
      脚本会创建一批**演示账号**（用户名形如 player1001，密码 player123）
      并写入评分，使排行榜可用。这些是种子数据，不是真实玩家行为，
@@ -27,9 +27,7 @@ from app.models.collection import Collection
 from app.models.review import Review
 from app.models.user import User
 
-CATALOG = os.path.join(
-    os.path.dirname(__file__), "..", ".workbuddy", "tmp", "catalog.json"
-)
+CATALOG = os.path.join(os.path.dirname(__file__), "data", "catalog.json")
 DEMO_PREFIX = "player"
 DEMO_PASSWORD = "player123"
 DEMO_USER_COUNT = 60
