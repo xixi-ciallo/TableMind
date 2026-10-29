@@ -48,7 +48,7 @@ async def _recalc(db: AsyncSession, game_id: int) -> None:
         return
     row = (
         await db.execute(
-            select(func.avg(Review.rating), func.count(Review.id)).where(
+            select(func.avg(Review.rating), func.count(Review.rating)).where(
                 Review.game_id == game_id
             )
         )
@@ -86,6 +86,7 @@ def _to_out(
 async def list_reviews(
     game_id: int | None = None,
     mine: bool = False,
+    include_ratings: bool = False,
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
@@ -106,8 +107,11 @@ async def list_reviews(
         if not current_user:
             raise HTTPException(status_code=401, detail="请先登录")
         stmt = stmt.where(Review.user_id == current_user.id)
-    # 评测列表只返回「写了正文」的评测；纯评分（content 为空）只计入评分汇总，不进入列表
-    stmt = stmt.where(Review.content.is_not(None), Review.content != "")
+    # 默认只返回「写了正文」的评测；纯评分（content 为空）只计入评分汇总。
+    # 详情页可传 include_ratings=true 把「仅评分」也列出来——否则在没有长评的游戏上
+    # 列表永远是空的，而页面上方又显示有 N 人评过分，观感自相矛盾。
+    if not include_ratings:
+        stmt = stmt.where(Review.content.is_not(None), Review.content != "")
     rows = (await db.execute(stmt.order_by(Review.id.desc()).limit(limit))).all()
     if not rows:
         return []
@@ -183,11 +187,12 @@ async def create_review(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """发表 / 更新评测或评分。
+    """发表 / 更新评分或评测。
 
     同一用户对同一桌游只保留一条记录。
-    - 带正文（content）的是「评测」；只打分不带正文的是「纯评分」。
-    - 更新时：正文为空则清空正文（退回纯评分），避免残留旧正文。
+    - 右侧「玩家评分」只提交 rating；
+    - 「玩家评测」只提交 content（可带图片）；
+    - 只更新本次提交的字段：写评测不会清掉已有评分，评分也不会清掉已有正文。
     """
     game = await db.get(BoardGame, data.game_id)
     if not game:
@@ -204,8 +209,10 @@ async def create_review(
     content = data.content.strip() if data.content and data.content.strip() else None
 
     if existing:
-        existing.rating = data.rating
-        existing.content = content
+        if data.rating is not None:
+            existing.rating = data.rating
+        if content is not None:
+            existing.content = content
         review = existing
     else:
         review = Review(

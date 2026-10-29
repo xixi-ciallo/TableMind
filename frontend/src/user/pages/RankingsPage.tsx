@@ -319,7 +319,8 @@ export default function RankingsPage() {
     let alive = true;
     client
       .get<{ rows: SiteRow[]; fallback?: boolean }>('/rankings', {
-        params: { board: 'overall', limit: SHOW },
+        /* 本站评分榜取满 20 名：评分人数门槛放宽到 2（当前 47 款收录、20 款有 2+ 条评分） */
+        params: { board: 'overall', limit: SHOW, min_ratings: 2 },
       })
       .then(({ data }) => {
         if (!alive) return;
@@ -348,7 +349,11 @@ export default function RankingsPage() {
 
   /** BGG 极客榜：只保留本站已收录的作品，并按它们的 BGG 名次重新连续编号 1..n */
   const bggList: Array<BggGeekItem & { rank: number }> = bggGeekRanking
-    .filter((it): it is BggGeekItem & { slug: string } => Boolean(it.slug))
+    /* slug 存在还不够，必须能在本站游戏库里真正找到，避免把站外作品排进来 */
+    .filter(
+      (it): it is BggGeekItem & { slug: string } =>
+        it.slug !== null && Boolean(getGameByIdOrSlug(it.slug)),
+    )
     .sort((a, b) => a.position - b.position)
     .slice(0, SHOW)
     .map((it, i) => ({ ...it, rank: i + 1 }));
@@ -401,7 +406,7 @@ export default function RankingsPage() {
           note={
             siteFallback
               ? '暂未收到玩家评分，按库内收录顺序展示'
-              : '玩家真实评分，客观反映口碑（少于 3 人评分暂不入榜）'
+              : '玩家真实评分，客观反映口碑（少于 2 人评分暂不入榜）'
           }
         >
           {site === null && <CardSkeleton />}

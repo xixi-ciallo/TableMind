@@ -21,6 +21,10 @@ import type {
   AdminRuleBook,
   AdminSeriesPoint,
   AdminStats,
+  EvalCase,
+  EvalCasePayload,
+  EvalRun,
+  EvalRunDetail,
   RuleBookBuildResult,
   AdminTag,
   AdminTagPayload,
@@ -28,10 +32,13 @@ import type {
   AdminTagSyncResult,
   AdminTagType,
   ApiMessage,
+  ConfigAuditItem,
+  ConfigValue,
   RuleChunkItem,
   RuleDocStatus,
   RuleDocSummary,
   RuleDocUploadResult,
+  RuntimeConfigItem,
   UserStatusResult,
 } from './adminTypes';
 import type { ModerationKind } from './adminTypes';
@@ -595,5 +602,154 @@ export async function reembedRuleDocs(gameId: number): Promise<RuleDocStatus> {
     };
   } catch (e) {
     throw new Error(toMessage(e, '补向量失败'));
+  }
+}
+
+/* ============================ P3 评测中心 ============================ */
+
+export async function fetchEvalCases(gameId?: number): Promise<EvalCase[]> {
+  try {
+    const { data } = await client.get<EvalCase[]>('/admin/evals/cases', {
+      params: { game_id: gameId || undefined },
+    });
+    return pickArray<EvalCase>(data);
+  } catch (e) {
+    throw new Error(toMessage(e, '获取评测用例失败'));
+  }
+}
+
+export async function createEvalCase(payload: EvalCasePayload): Promise<EvalCase> {
+  try {
+    const { data } = await client.post<EvalCase>('/admin/evals/cases', payload);
+    return data;
+  } catch (e) {
+    throw new Error(toMessage(e, '新增评测用例失败'));
+  }
+}
+
+export async function updateEvalCase(
+  caseId: number,
+  payload: Partial<EvalCasePayload>,
+): Promise<EvalCase> {
+  try {
+    const { data } = await client.put<EvalCase>(`/admin/evals/cases/${caseId}`, payload);
+    return data;
+  } catch (e) {
+    throw new Error(toMessage(e, '保存评测用例失败'));
+  }
+}
+
+export async function deleteEvalCase(caseId: number): Promise<ApiMessage> {
+  try {
+    const { data } = await client.delete<ApiMessage>(`/admin/evals/cases/${caseId}`);
+    return data ?? {};
+  } catch (e) {
+    throw new Error(toMessage(e, '删除评测用例失败'));
+  }
+}
+
+/** 创建批次：后端立即返回 run_id，实际评测在后台跑，前端轮询详情 */
+export async function createEvalRun(payload: {
+  case_ids?: number[];
+  game_id?: number;
+  note?: string;
+}): Promise<EvalRun> {
+  try {
+    const { data } = await client.post<EvalRun>('/admin/evals/runs', payload);
+    return data;
+  } catch (e) {
+    throw new Error(toMessage(e, '启动评测失败'));
+  }
+}
+
+export async function fetchEvalRuns(limit = 20): Promise<EvalRun[]> {
+  try {
+    const { data } = await client.get<EvalRun[]>('/admin/evals/runs', {
+      params: { limit },
+    });
+    return pickArray<EvalRun>(data);
+  } catch (e) {
+    throw new Error(toMessage(e, '获取评测批次失败'));
+  }
+}
+
+export async function fetchEvalRunDetail(runId: number): Promise<EvalRunDetail> {
+  try {
+    const { data } = await client.get<EvalRunDetail>(`/admin/evals/runs/${runId}`);
+    return {
+      ...data,
+      results: pickArray(data?.results),
+    };
+  } catch (e) {
+    throw new Error(toMessage(e, '获取评测结果失败'));
+  }
+}
+
+export async function deleteEvalRun(runId: number): Promise<ApiMessage> {
+  try {
+    const { data } = await client.delete<ApiMessage>(`/admin/evals/runs/${runId}`);
+    return data ?? {};
+  } catch (e) {
+    throw new Error(toMessage(e, '删除评测批次失败'));
+  }
+}
+
+/* ============================ P4 系统配置 ============================ */
+
+export async function fetchRuntimeConfigs(): Promise<RuntimeConfigItem[]> {
+  try {
+    const { data } = await client.get<RuntimeConfigItem[]>('/admin/configs');
+    return pickArray<RuntimeConfigItem>(data);
+  } catch (e) {
+    throw new Error(toMessage(e, '获取系统配置失败'));
+  }
+}
+
+/** 修改生效值：后端写入数据库并立即应用到当前进程，无需重启 */
+export async function updateRuntimeConfig(
+  key: string,
+  value: ConfigValue,
+): Promise<RuntimeConfigItem> {
+  try {
+    const { data } = await client.put<RuntimeConfigItem>(`/admin/configs/${key}`, { value });
+    return data;
+  } catch (e) {
+    throw new Error(toMessage(e, '保存配置失败'));
+  }
+}
+
+/** 删除数据库覆盖，回到 .env 默认值 */
+export async function resetRuntimeConfig(key: string): Promise<RuntimeConfigItem> {
+  try {
+    const { data } = await client.delete<RuntimeConfigItem>(`/admin/configs/${key}`);
+    return data;
+  } catch (e) {
+    throw new Error(toMessage(e, '恢复默认值失败'));
+  }
+}
+
+export async function fetchConfigAudits(
+  key?: string,
+  limit = 50,
+): Promise<ConfigAuditItem[]> {
+  try {
+    const { data } = await client.get<ConfigAuditItem[]>('/admin/configs/audits', {
+      params: { key: key || undefined, limit },
+    });
+    return pickArray<ConfigAuditItem>(data);
+  } catch (e) {
+    throw new Error(toMessage(e, '获取变更记录失败'));
+  }
+}
+
+/** 回滚：把该记录的旧值写回并再记一条 rollback 审计 */
+export async function rollbackConfigAudit(auditId: number): Promise<RuntimeConfigItem> {
+  try {
+    const { data } = await client.post<RuntimeConfigItem>(
+      `/admin/configs/audits/${auditId}/rollback`,
+    );
+    return data;
+  } catch (e) {
+    throw new Error(toMessage(e, '回滚失败'));
   }
 }

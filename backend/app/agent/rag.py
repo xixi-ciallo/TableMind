@@ -13,7 +13,7 @@ import logging
 import math
 import re
 from collections import Counter
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import llm
@@ -31,18 +31,16 @@ SYSTEM_PROMPT = """你是 TableMind（桌游信息库）的 AI 助手，专注�
 0. 【规则说明书】是权威来源：若资料里提供了某游戏的「规则说明书」片段，优先据此回答具体规则细节（回合流程、组件、拿取规则、计分、胜负条件等），可在相关结论后标注「依据规则说明书」；结构化资料仅作补充。
 1. 只能依据「本站收录资料」中给出的事实作答。规则说明书与结构化资料都未覆盖的信息（价格、库存、评分人数等）必须如实说"本站暂无该信息"，绝对不要编造。
 2. 推荐游戏时，从资料里挑选真正符合条件的，并说明推荐理由；如果资料里没有符合条件的，直说没有。
+   注意：「本次检索命中 N 条」只是这一次检索到的资料数量，不是本站的收录总量；绝不能据此说「本站只收录了这几款」。资料不足时只说这一轮没找到合适的，不要说全站只有这些。
 3. 讲解规则时，用清晰的分点说明；规则说明书与结构化资料都未覆盖的细节，要明确提示"该细节需参考说明书"。
 4. 语言简洁友好，中文作答，避免空泛套话。
 5. 不要暴露你的思维过程，只输出最终回答。
 6. 输出格式：纯文本，不要使用任何 Markdown 语法（禁止 #、**、_、表格、代码块）。
    用空行分段，分点用「1. 2. 3.」或「- 」，强调只靠语气和小标题文字本身。
+7. 按问题本身的需要作答，不限制字数：信息足够就讲透，信息不足就直接说明。"""
 
-当前回答模式：{mode_desc}"""
-
-MODE_DESC = {
-    "fast": "快速模式——直接给结论，控制在 150 字以内，不超过 3 款推荐。",
-    "deep": "深度模式——展开讲解，可对比分析，推荐 3-5 款并说明各自适用场景，可到 500 字。",
-}
+# 统一答案输出上限：仅作为接口侧的兜底保护，提示词里不再限制字数。
+ANSWER_MAX_TOKENS = 8000
 
 
 def _extract_players(message: str) -> int | None:
@@ -166,16 +164,40 @@ async def retrieve(db: AsyncSession, message: str, limit: int = 8) -> tuple[list
     return await tools.random_picks(db, limit=min(limit, 5)), "fallback"
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    """余弦相似度（规则说明书切片规模很小，Python 内计算足够快）。"""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+async def _configure_vector_search(db: AsyncSession, pool: int) -> None:
+    """为带过滤条件的 HNSW 检索打开迭代扫描（pgvector 0.8+）。
+
+    HNSW 是近似索引：`ORDER BY embedding <=> q` 叠加 `game_id` 过滤时，可能扫到少量
+    命中就提前停止，返回条数不足 LIMIT。relaxed_order 会让它继续扫描，直到凑够 LIMIT
+    或触达 `hnsw.max_scan_tuples`；顺序不再严格按距离，但融合阶段会用真实相似度重排。
+    低版本 pgvector 没有这两个 GUC，用 savepoint 吸收报错后退回精确排序。
+    """
+    try:
+        async with db.begin_nested():
+            await db.execute(text(f"SET LOCAL hnsw.ef_search = {max(pool, 40)}"))
+            await db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+    except Exception as exc:  # noqa: BLE001 - 扩展版本差异不应阻断检索
+        log.debug("pgvector 迭代扫描不可用，退回精确排序: %s", exc)
+
+
+async def _vector_top_n(
+    db: AsyncSession, game_id: int, qvec: list[float], limit: int
+) -> list[tuple[int, float]]:
+    """在 pgvector 上取余弦 Top-N，返回 [(rule_documents.id, 相似度)]。
+
+    相似度 = 1 - 余弦距离（pgvector `<=>` 运算符），与旧的 Python `_cosine` 定义一致。
+    `ORDER BY embedding <=> :q` 可由 `rule_documents.embedding` 上的 HNSW 索引直接服务，
+    不再把整列 1536 维向量拉回 Python 逐条点积。
+    """
+    distance = RuleDocument.embedding.cosine_distance(qvec)
+    stmt = (
+        select(RuleDocument.id, (1.0 - distance).label("score"))
+        .where(RuleDocument.game_id == game_id)
+        .order_by(distance)
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [(int(r.id), float(r.score)) for r in rows]
 
 
 _MIN_PREFIX = 4  # 公共前缀至少 4 个字才算命中，避免「玩家」「游戏」这类通用开头误匹配
@@ -271,6 +293,25 @@ async def identify_games(db: AsyncSession, message: str) -> list[BoardGame]:
     return [g for _, _, g in cands]
 
 
+def _clip_parent(parent: str, child: str, max_chars: int) -> str:
+    """父片过长时，围绕**命中子片**所在位置取窗口，避免截断掉真正相关的那段。
+
+    纯截头部在这里是错的：子片可能是父章节的第 3 段，截头会把答案截没。
+    """
+    if not parent:
+        return child
+    if max_chars <= 0 or len(parent) <= max_chars:
+        return parent
+    body = child.split("\n", 1)[-1].strip()[:120]
+    pos = parent.find(body) if body else -1
+    if pos < 0:
+        return parent[:max_chars] + "…"
+    start = max(0, pos - max_chars // 3)
+    end = min(len(parent), start + max_chars)
+    start = max(0, end - max_chars)
+    return ("…" if start > 0 else "") + parent[start:end] + ("…" if end < len(parent) else "")
+
+
 async def retrieve_rule_chunks(db: AsyncSession, game_id: int, query: str, k: int = 5) -> list[str]:
     """检索某款游戏的【规则说明书】片段，按与提问的相关性排序（只要文本）。"""
     return [c for _idx, c in await retrieve_rule_chunk_hits(db, game_id, query, k)]
@@ -285,7 +326,8 @@ async def retrieve_rule_chunk_hits(
 
     1. **查询改写**：把口语化提问改写成规则书措辞（「硬币」→「钱币」、「暖到什么
        程度」→「温度达到多少」），多查询并行检索、每条切片取最高分。
-    2. **混合召回**：向量语义 + BM25 字面（中文按二元组切词，无需分词器）。
+    2. **混合召回**：向量语义（pgvector 内按余弦距离取 Top-N，走 HNSW 索引） +
+       BM25 字面（中文按 jieba 分词，不可用时回落二元组）。
        纯向量对「配件清单 / 准备物资的数字」类提问召回极差——答案原文里逐字存在，
        但整页切片语义被稀释，正确切片排名落到 4~18 位；BM25 能直接抓住稀有词。
     3. **归一化分数融合**（不是 RRF）：两路各自按自身最大值归一化到 [0,1] 后加权
@@ -300,39 +342,67 @@ async def retrieve_rule_chunk_hits(
     为什么需要：降级路径（大模型不可用，直接把规则原文端给用户）若只给高分切片，
     拿到的是碎片——「公，推翻统治。内奸：…」这种半截句读起来像乱码；
     带上前后文才读得成一段连续的规则。**只用于兜底展示，不参与检索排序**。
+
+    默认还会做**父块回填**（PARENT_FILL_ENABLED）：子片只负责匹配，命中后返回它所属的
+    完整章节文本（同一父片去重、限长），让模型拿到上下文完整的规则段落。
+    历史数据没有父片信息时自动回落到子片正文。
     """
+    # 只取检索需要的列：embedding 不加载，向量相似度交给 pgvector 在库里算。
     rows = (
         await db.execute(
-            select(RuleDocument).where(RuleDocument.game_id == game_id).order_by(RuleDocument.chunk_index)
+            select(
+                RuleDocument.id,
+                RuleDocument.chunk_index,
+                RuleDocument.content,
+                RuleDocument.rule_book_id,
+                RuleDocument.parent_index,
+                RuleDocument.parent_text,
+                RuleDocument.embedding.isnot(None).label("has_embedding"),
+            )
+            .where(RuleDocument.game_id == game_id)
+            .order_by(RuleDocument.chunk_index)
         )
-    ).scalars().all()
+    ).all()
     if not rows:
         return []
 
     docs = [r.content for r in rows]
     idx = [int(r.chunk_index) for r in rows]
+    row_pos = {int(r.id): i for i, r in enumerate(rows)}
 
-    # ---- 查询改写：把口语化提问改写成规则书措辞，对抗同义改写 ----
-    variants = [query]
-    if QUERY_EXPAND_ENABLED and llm.available():
-        variants += await _expand_queries(query)
+    # ---- 查询增强：查询改写（口语 → 规则书措辞）与 HyDE（假设答案）并行 ----
+    # 两个调用互相独立，并行可把这段额外延迟压到约等于单次调用；各自内部已做开关判断与失败兜底。
+    expansions, hyde_doc = await asyncio.gather(
+        _expand_queries(query), _hyde_document(query)
+    )
+    variants = [query] + expansions
 
-    # ---- 第一路：向量语义召回（多个改写取每条切片的最高分）----
+    # ---- 第一路：向量语义召回（多个改写 + 假设答案取每条切片的最高分）----
+    # HyDE 只进向量路：假设答案的虚构词会污染 BM25 字面召回，故 BM25 仍只用原查询 + 改写。
+    # 每路查询在 pgvector 里取 Top-N（默认 60；单款游戏切片通常不足 40 段，可覆盖全部）。
+    # 超出候选池的切片视为「无向量证据」记 0 分，仍可由 BM25 路召回，不丢失字面命中。
     vec_scores: list[float] | None = None
-    embedded = [r for r in rows if r.embedding]
-    if len(embedded) == len(rows):
-        per_variant = []
-        for q in variants:
-            qvec = await llm.embed(q)
-            if qvec:
-                per_variant.append([_cosine(qvec, r.embedding) for r in rows])
-        if per_variant:
-            vec_scores = [max(s[i] for s in per_variant) for i in range(len(rows))]
+    if all(r.has_embedding for r in rows):
+        vec_queries = variants + ([hyde_doc] if hyde_doc else [])
+        qvecs = await asyncio.gather(*(llm.embed(q) for q in vec_queries))
+        valid_qvecs = [qv for qv in qvecs if qv]
+        if valid_qvecs:
+            pool = max(1, min(int(settings.RAG_VECTOR_POOL), len(rows)))
+            vec_scores = [0.0] * len(rows)
+            await _configure_vector_search(db, pool)
+            # AsyncSession 不支持同一会话内并发查询，多路查询顺序执行；
+            # 每路只返回 Top-N（走索引），耗时与总切片数无关。
+            for qvec in valid_qvecs:
+                for doc_id, score in await _vector_top_n(db, game_id, qvec, pool):
+                    pos = row_pos.get(doc_id)
+                    if pos is not None and score > vec_scores[pos]:
+                        vec_scores[pos] = score
 
     # ---- 第二路：BM25 字面召回（同样对多个改写取最高分）----
     bm_per_variant = [_bm25_scores(q, docs) for q in variants]
     bm_scores = [max(s[i] for s in bm_per_variant) for i in range(len(docs))]
 
+    boost = _section_boost(docs, query)
     if vec_scores is None:
         # embedding 不可用：只用字面召回；一个查询词都没命中时退回关键词命中 / 顺序截取
         if max(bm_scores, default=0.0) <= 0:
@@ -341,16 +411,27 @@ async def retrieve_rule_chunk_hits(
         else:
             order = _rank_desc(bm_scores)
     else:
-        order = _hybrid_order(vec_scores, bm_scores, _section_boost(docs, query))
+        order = _hybrid_order(vec_scores, bm_scores, boost)
 
-    # ---- 可选 Rerank 阶段（默认关闭）：融合后再精细排序，纠正难例 ----
+    # ---- Rerank 阶段：融合后再精细排序，纠正难例 ----
     # 仅对前 RERANK_TOP_N 个候选打分重排，其余保持原序追加在后；任何异常回落融合顺序。
     if settings.RERANK_ENABLED and len(order) > k:
         try:
             from app.agent import rerank as _rerank
 
-            cands = [(order[i], docs[order[i]]) for i in range(min(settings.RERANK_TOP_N, len(order)))]
-            reranked = await _rerank.rerank_rule_chunks(query, cands, method=settings.RERANK_METHOD)
+            head_n = min(settings.RERANK_TOP_N, len(order))
+            cands = [(order[i], docs[order[i]]) for i in range(head_n)]
+            cand_scores = None
+            if vec_scores is not None and (settings.RERANK_METHOD or "").lower() == "score":
+                fused = _fused_scores(vec_scores, bm_scores, boost)
+                cand_scores = [fused[order[i]] for i in range(head_n)]
+            reranked = await _rerank.rerank_rule_chunks(
+                query,
+                cands,
+                scores=cand_scores,
+                method=settings.RERANK_METHOD,
+                top_n=settings.RERANK_TOP_N,
+            )
             reranked_idx = [i for i, _ in reranked]
             order = reranked_idx + order[len(reranked_idx):]
         except Exception as e:  # noqa: BLE001
@@ -362,20 +443,47 @@ async def retrieve_rule_chunk_hits(
         for i in picked:
             keep.update(range(max(0, i - expand), min(len(docs), i + expand + 1)))
         picked = sorted(keep)
-    return [(idx[i], docs[i]) for i in picked]
+        return [(idx[i], docs[i]) for i in picked]
+
+    # ---- 父块回填：子片负责匹配，命中后把所属父章节交给模型 ----
+    # 同一章节的多个子片可能同时被召回，按父片去重（保留排名最高的那片），
+    # 这样 k 段上下文覆盖的是 k 个不同章节，而不是同一节的三段碎片。
+    # 历史切片 parent_text 为空：自动回落到子片正文，行为与改造前完全一致。
+    if settings.PARENT_FILL_ENABLED:
+        seen: set[tuple[int, int]] = set()
+        distinct: list[int] = []
+        for i in order:
+            r = rows[i]
+            # 同一本规则书内的 parent_index 才可比：不同规则书的 chunk_index 各自编号，可能重复
+            key = (
+                int(r.rule_book_id or 0),
+                int(r.parent_index) if r.parent_index is not None else int(r.chunk_index),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            distinct.append(i)
+            if len(distinct) >= k:
+                break
+        picked = distinct
+
+    out: list[tuple[int, str]] = []
+    for i in picked:
+        r = rows[i]
+        parent = (r.parent_text or "").strip() if settings.PARENT_FILL_ENABLED else ""
+        text = _clip_parent(parent, docs[i], settings.PARENT_MAX_CHARS) if parent else docs[i]
+        out.append((idx[i], text))
+    return out
 
 
 # ---- 混合检索的内部实现 ----
-
-VECTOR_WEIGHT = 1.0      # 向量召回在融合中的权重
-BM25_WEIGHT = 1.6        # 字面召回权重（规则问答里专有名词/数字多，实测高于向量效果更好）
-FUSION = "score"         # "score"=归一化分数加权；"rrf"=排名倒数融合
+# 融合方式与两路权重由 settings 控制（RAG_FUSION / RAG_VECTOR_WEIGHT / RAG_BM25_WEIGHT），
+# 便于按环境切换和离线调参，不再写死在代码里。
 _RRF_K = 60              # RRF 平滑常数，抑制头部排名的偶然性
 
 _CJK = r"\u4e00-\u9fff"
 
 
-QUERY_EXPAND_ENABLED = True     # 是否启用查询改写
 QUERY_EXPAND_N = 2              # 额外生成几个改写查询
 QUERY_EXPAND_MAX_TOKENS = 1200  # 该模型是推理模型，思维链会占用预算，给不足会得到空串
 QUERY_EXPAND_TEMPERATURE = 0.2
@@ -400,7 +508,7 @@ async def _expand_queries(query: str) -> list[str]:
 
     失败安全：任何异常都返回空列表，检索只用原查询，绝不影响主流程。
     """
-    if not QUERY_EXPAND_ENABLED:
+    if not settings.RAG_QUERY_EXPAND_ENABLED or not llm.available():
         return []
     cached = _expand_cache.get(query)
     if cached is not None:
@@ -418,7 +526,7 @@ async def _expand_queries(query: str) -> list[str]:
                 ],
                 temperature=QUERY_EXPAND_TEMPERATURE,
                 max_tokens=QUERY_EXPAND_MAX_TOKENS,
-                model=settings.LLM_RULE_MODEL or settings.LLM_MODEL,
+                model=settings.LLM_FAST_MODEL or settings.LLM_MODEL,
                 enable_thinking=False,
             )
             break
@@ -445,22 +553,118 @@ async def _expand_queries(query: str) -> list[str]:
     return out
 
 
-def _tokenize(text: str) -> list[str]:
-    """中英文混合分词：中文按 **二元组**（无需第三方分词器），英文/数字按词。
+# ---- HyDE（Hypothetical Document Embeddings）----
+# 问题和规则书的「文体」差异很大（口语提问 vs 说明书条文），直接拿问题向量去检索
+# 常常对不上。HyDE 让模型先写一段「像规则书原文」的假设答案，再用它去检索——
+# 假设答案即便事实有偏差，词面与句式也更接近真实片段，向量召回更稳。
+# 只用于向量路：假设答案里的虚构词会污染 BM25 字面召回，故绝不加入 BM25。
+_HYDE_PROMPT = """你是桌游规则说明书的作者。请针对下面的问题，写一段 100~200 字的规则书条文式回答。
 
-    中文用二元组是因为没有 jieba 依赖时，它是 CJK 检索的标准做法：
-    「玩家卡牌」→「玩家 / 家卡 / 卡牌」，既能匹配也能抗一点语序变化。
+要求：
+1. 用陈述语气直接写规则（流程、数字、费用、计分等），像正式说明书的某一节。
+2. 不要解释、不要 Markdown、不要提到「假设」「推测」。
+3. 只输出这段正文。"""
+
+_HYDE_MAX_CHARS = 600
+_hyde_cache: dict[str, str] = {}
+_HYDE_CACHE_MAX = 500
+
+
+async def _hyde_document(query: str) -> str:
+    """生成假设答案文本；未启用 / 未配置密钥 / 失败时返回空串（调用方照常检索）。"""
+    if not settings.HYDE_ENABLED or not llm.available():
+        return ""
+    cached = _hyde_cache.get(query)
+    if cached is not None:
+        return cached
+    try:
+        raw = await llm.chat_complete(
+            [
+                {"role": "system", "content": _HYDE_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            temperature=settings.HYDE_TEMPERATURE,
+            max_tokens=settings.HYDE_MAX_TOKENS,
+            model=settings.LLM_FAST_MODEL or settings.LLM_MODEL,
+            enable_thinking=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("HyDE 生成失败，跳过假设答案：%s", e)
+        return ""
+    doc = re.sub(r"\s+", " ", raw or "").strip()[:_HYDE_MAX_CHARS]
+    if len(doc) < 12:
+        return ""  # 空结果不缓存，下次请求重试
+    if len(_hyde_cache) >= _HYDE_CACHE_MAX:
+        _hyde_cache.clear()
+    _hyde_cache[query] = doc
+    return doc
+
+
+_JIEBA_UNSET = object()
+_jieba = _JIEBA_UNSET
+
+
+def _load_jieba():
+    """懒加载 jieba；不可用时返回 None（检索自动回落二元组）。
+
+    不放到模块顶部 import：jieba 首次加载会读词典（几百毫秒），
+    没装或加载失败时也不该让整个模块 import 失败。
+    """
+    global _jieba
+    if _jieba is _JIEBA_UNSET:
+        try:
+            import jieba
+
+            jieba.setLogLevel(logging.WARNING)
+            _jieba = jieba
+        except Exception as e:  # noqa: BLE001
+            log.info("jieba 不可用，BM25 回落中文二元组：%s", e)
+            _jieba = None
+    return _jieba
+
+
+# 分词结果缓存：同一批规则切片会随每次提问重复分词，缓存后每轮只算提问本身。
+_TOKEN_CACHE: dict[tuple[str, str], list[str]] = {}
+_TOKEN_CACHE_MAX = 4000
+
+
+def _tokenize(text: str) -> list[str]:
+    """中英文混合分词：中文按 jieba（不可用时二元组），英文/数字按词。
+
+    - jieba：切出真实词边界，稀有专有词（「钱币」「磁砖」）召回更准，且词表外的
+      多字组合仍会被切成单字兜底；首次调用有词典加载开销，进程内只付一次。
+    - 二元组兜底：「玩家卡牌」→「玩家 / 家卡 / 卡牌」，无需第三方依赖，抗一点语序变化。
     """
     s = (text or "").lower()
+    mode = (settings.RAG_BM25_TOKENIZER or "auto").strip().lower()
+    key = (mode, s)
+    cached = _TOKEN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    jb = None
+    if mode in ("auto", "jieba"):
+        jb = _load_jieba()
+        if jb is None and mode == "jieba":
+            mode = "bigram"  # 显式要求 jieba 但不可用：回落二元组，保证检索不中断
+    if mode not in ("auto", "jieba"):
+        jb = None
+
     toks: list[str] = []
     for run in re.findall(rf"[{_CJK}]+|[a-z0-9]+", s):
         if run[0] >= "\u4e00":
-            if len(run) == 1:
+            if jb is not None:
+                toks.extend(w for w in jb.lcut(run) if w.strip())
+            elif len(run) == 1:
                 toks.append(run)
             else:
                 toks.extend(run[i:i + 2] for i in range(len(run) - 1))
         else:
             toks.append(run)
+
+    if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+        _TOKEN_CACHE.clear()
+    _TOKEN_CACHE[key] = toks
     return toks
 
 
@@ -561,6 +765,33 @@ def _section_boost(docs: list[str], query: str) -> list[float]:
     return out
 
 
+def _fused_scores(
+    vec_scores: list[float],
+    bm_scores: list[float],
+    boost: list[float] | None = None,
+) -> list[float]:
+    """把两路检索分数融合成最终得分（与排序解耦，供 rerank "score" 方法复用）。"""
+    fusion = (settings.RAG_FUSION or "score").strip().lower()
+    if fusion == "rrf":
+        # RRF 只用名次，输出是「名次 → 融合分」的稠密数组，便于和 score 路统一消费
+        order = _rrf(
+            [_rank_desc(vec_scores), _rank_desc(bm_scores)],
+            [settings.RAG_VECTOR_WEIGHT, settings.RAG_BM25_WEIGHT],
+        )
+        rank = {idx: r for r, idx in enumerate(order)}
+        return [1.0 / (_RRF_K + rank[i] + 1) for i in range(len(vec_scores))]
+
+    v = _normalize(vec_scores)
+    b = _normalize(bm_scores)
+    total = [
+        settings.RAG_VECTOR_WEIGHT * a + settings.RAG_BM25_WEIGHT * c
+        for a, c in zip(v, b)
+    ]
+    if boost:
+        total = [t * m for t, m in zip(total, boost)]
+    return total
+
+
 def _hybrid_order(
     vec_scores: list[float],
     bm_scores: list[float],
@@ -568,21 +799,13 @@ def _hybrid_order(
 ) -> list[int]:
     """把向量路与 BM25 路融合成最终排序（纯函数，便于离线调参与回归测试）。
 
-    默认用 **归一化分数加权**（FUSION="score"）。为什么不用纯 RRF：RRF 只看排名、
-    丢掉了「领先多少」这个置信度。实测「初始配件里有多少张玩家卡牌」这道题，
-    BM25 给正确切片 16.1 分、第二名只有 5.81（绝对优势），但向量路把它排到 18 名，
-    RRF 一融合就被拖到第 4 名而漏召；改成分数融合后正确切片回到第 1。
+    默认用 **归一化分数加权**（settings.RAG_FUSION="score"）。为什么不用纯 RRF：
+    RRF 只看排名、丢掉了「领先多少」这个置信度。实测「初始配件里有多少张玩家卡牌」
+    这道题，BM25 给正确切片 16.1 分、第二名只有 5.81（绝对优势），但向量路把它排到
+    18 名，RRF 一融合就被拖到第 4 名而漏召；改成分数融合后正确切片回到第 1。
+    需要按「只看名次」融合时把 RAG_FUSION 设为 "rrf" 即可，两条路共用同一套权重。
     """
-    if FUSION == "rrf":
-        return _rrf([_rank_desc(vec_scores), _rank_desc(bm_scores)],
-                    [VECTOR_WEIGHT, BM25_WEIGHT])
-
-    v = _normalize(vec_scores)
-    b = _normalize(bm_scores)
-    total = [VECTOR_WEIGHT * a + BM25_WEIGHT * c for a, c in zip(v, b)]
-    if boost:
-        total = [t * m for t, m in zip(total, boost)]
-    return _rank_desc(total)
+    return _rank_desc(_fused_scores(vec_scores, bm_scores, boost))
 
 
 def _keywords(text: str) -> list[str]:
@@ -628,7 +851,6 @@ def format_context(games: list[dict]) -> str:
 async def build_messages(
     db: AsyncSession,
     message: str,
-    mode: str = "fast",
     history: list[tuple[str, str]] | None = None,
     user_id: int | None = None,
     game_id: int | None = None,
@@ -640,7 +862,7 @@ async def build_messages(
     """
     games, _how = await retrieve(db, message)
 
-    system = SYSTEM_PROMPT.format(mode_desc=MODE_DESC.get(mode, MODE_DESC["fast"]))
+    system = SYSTEM_PROMPT
 
     context_parts: list[str] = []
 
@@ -655,20 +877,27 @@ async def build_messages(
         rule_chunks = await retrieve_rule_chunks(db, game.id, message)
     if rule_chunks:
         header = (
-            f"《{game.name}》的【规则说明书】片段（来自本站上传的真实说明书，"
+            f"《{game.name}》的【规则说明书】原文（来自本站上传的真实说明书，"
             f"按与提问的相关度排序，共 {len(rule_chunks)} 段）："
         )
-        context_parts.append(header + "\n\n" + "\n\n".join(
-            f"片段{i + 1}：{c}" for i, c in enumerate(rule_chunks)
-        ))
+        # 不编号：模型会照着编号引用「片段N」，把内部检索细节漏给用户
+        context_parts.append(header + "\n\n" + "\n\n".join(rule_chunks))
 
     # 结构化收录资料（始终附上，作为补充与兜底）
+    # 必须把「本次命中条数」和「全站收录总量」分开写：只给命中条数时，模型会把
+    # 「共 N 条」误读成「本站只有 N 款」，进而回答「本站只收录了这几款」。
+    total_games = int(await db.scalar(select(func.count(BoardGame.id))) or 0)
     if games:
         context_parts.append(
-            f"本站结构化收录资料（共 {len(games)} 条，均为真实数据）：\n{format_context(games)}"
+            f"本站结构化收录资料（本次检索命中 {len(games)} 条，均为真实数据）：\n{format_context(games)}"
         )
+        if len(games) < total_games:
+            context_parts.append(
+                f"全站收录总量：{total_games} 款桌游。上面只是本次检索命中的一部分，"
+                "不代表全站只有这些；本次没检出的款不能当成「本站未收录」。"
+            )
     else:
-        context_parts.append("（本站暂无相关结构化收录资料）")
+        context_parts.append("（本次未检索到结构化资料）")
 
     if user_id is not None:
         try:

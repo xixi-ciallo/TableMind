@@ -15,7 +15,8 @@ class Review(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     game_id: Mapped[int] = mapped_column(ForeignKey("board_games.id"), index=True)
-    rating: Mapped[int] = mapped_column(Integer)  # 1~10
+    # 评分与评测正文分离：右侧「玩家评分」只写 rating；「玩家评测」只写 content。
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1~10，可空
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     like_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

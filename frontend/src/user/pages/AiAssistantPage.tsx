@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
 import { Button, Divider, Drawer, Dropdown, Empty, Input, InputNumber, Popconfirm, Select, Spin, Tag, message } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
@@ -14,46 +13,20 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
-  ReadOutlined,
   ReloadOutlined,
   SettingOutlined,
-  SwapOutlined,
   SyncOutlined,
-  ThunderboltOutlined,
   UserOutlined,
-  CompassOutlined,
 } from '@ant-design/icons';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import client from '../../shared/api/client';
-import { ACTION, BRAND, INFO, LINK, TEXT_SECONDARY, TEXT_TERTIARY } from '../../shared/theme';
+import { ACTION, BRAND, TEXT_SECONDARY, TEXT_TERTIARY } from '../../shared/theme';
 import { useIsMobile } from '../../shared/useIsMobile';
 import { useAuthStore } from '../../stores/auth';
 
 const { TextArea } = Input;
 
 /* ────────────────────────────  静态内容  ──────────────────────────── */
-
-/** 回答模式：二选一互斥——「快速」给要点，「深度」展开更多真实字段 */
-const MODES = [
-  {
-    key: 'fast' as const,
-    label: '快速',
-    icon: <ThunderboltOutlined />,
-    hint: '只给要点：人数、时长与一句话简介',
-    border: 'rgba(255,107,69,.45)',
-    color: LINK,
-  },
-  {
-    key: 'deep' as const,
-    label: '深度',
-    icon: <HistoryOutlined />,
-    hint: '多给几款，并展开适龄、复杂度、分类与机制',
-    border: 'rgba(14,127,184,.45)',
-    color: INFO,
-  },
-];
-
-type ModeKey = (typeof MODES)[number]['key'];
 
 /** Agent 工具名 → 给用户的中文提示，避免把内部函数名暴露在界面上 */
 const TOOL_LABEL: Record<string, string> = {
@@ -62,73 +35,6 @@ const TOOL_LABEL: Record<string, string> = {
   get_game_detail: '正在查询游戏资料…',
   get_user_collection: '正在查看你的收藏…',
   random_picks: '正在挑选桌游…',
-};
-
-/** 「你可能想问」：按意图分组，点击直接发送。每个分组带图标与配色，帮用户快速看出 AI 能做什么。 */
-interface SuggestionGroup {
-  key: string;
-  label: string;
-  icon: ReactNode;
-  /** 分组强调色（仅用于图标与 hover 描边，不承载白字，故可用高亮色） */
-  accent: string;
-  items: string[];
-}
-
-const SUGGESTION_GROUPS: SuggestionGroup[] = [
-  {
-    key: 'rule',
-    label: '规则查询',
-    icon: <ReadOutlined />,
-    accent: INFO,
-    items: [
-      '卡坦岛 3 人局怎么开局布局？',
-      '《七大奇迹：对决》怎么算分取胜？',
-      '花砖物语一轮该怎么摆瓷砖？',
-      '《幽港迷城》上手难度真的很高吗？',
-      '三国杀主公身份该怎么玩？',
-    ],
-  },
-  {
-    key: 'recommend',
-    label: '挑桌游',
-    icon: <CompassOutlined />,
-    accent: LINK,
-    items: [
-      '推荐几款 4 人 45 分钟以内的德式桌游',
-      '有哪些适合和爸妈一起玩的桌游？',
-      '今晚 3 个人想玩点轻策，有推荐吗？',
-    ],
-  },
-  {
-    key: 'compare',
-    label: '游戏对比',
-    icon: <SwapOutlined />,
-    accent: '#7c5cff',
-    items: [
-      '瘟疫危机和它的传承版有什么区别？',
-      '阿瓦隆和一夜终极狼人哪个更适合新手？',
-      '卡卡颂和王国米诺哪个更适合家庭？',
-    ],
-  },
-  {
-    key: 'random',
-    label: '随手挑',
-    icon: <ThunderboltOutlined />,
-    accent: ACTION,
-    items: ['帮我随机挑 3 款今天能开局的桌游'],
-  },
-];
-
-/** 登录后追加「我的收藏」分组：AI 可读取用户收藏后再作答 */
-const COLLECTION_GROUP: SuggestionGroup = {
-  key: 'collection',
-  label: '我的收藏',
-  icon: <HeartOutlined />,
-  accent: BRAND,
-  items: [
-    '我收藏的桌游里有哪些适合 4 人玩？',
-    '我收藏的游戏里哪款复杂度最高？',
-  ],
 };
 
 interface Message {
@@ -180,7 +86,6 @@ export default function AiAssistantPage() {
   // 空态不预设任何助手气泡：用户提问后才出现「正在思考…」并流式输出
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [mode, setMode] = useState<ModeKey>('fast');
   const [sessionId, setSessionId] = useState<number | null>(null);
   /** 等待后端返回 / 流式输出期间为 true */
   const [busy, setBusy] = useState(false);
@@ -367,6 +272,17 @@ export default function AiAssistantPage() {
     }
   };
 
+  /** 删除一条 AI 自动积累的交互记录 */
+  const deleteEpisode = async (id: number) => {
+    try {
+      await client.delete(`/ai/memory/episodes/${id}`);
+      setPrefEpisodes((prev) => prev.filter((e) => e.id !== id));
+      message.success('已删除该记录');
+    } catch {
+      message.error('删除失败，请重试');
+    }
+  };
+
   /** 深链：/ai?session=<id> 直接打开某次历史对话 */
   useEffect(() => {
     const sid = Number(searchParams.get('session'));
@@ -395,7 +311,7 @@ export default function AiAssistantPage() {
       const next = prev.slice();
       const last = next[next.length - 1];
       if (last && last.role === 'assistant') {
-        next[next.length - 1] = { role: 'assistant', content: last.content + delta };
+        next[next.length - 1] = { ...last, content: last.content + delta };
       } else {
         next.push({ role: 'assistant', content: delta });
       }
@@ -403,13 +319,13 @@ export default function AiAssistantPage() {
     });
   };
 
-  /** 清空最后一条助手消息（大模型中途失败、改用降级结果时） */
-  const clearLastAssistant = () => {
+  /** 给最后一条助手消息打补丁（引用片段 / 消息 id / 反馈状态） */
+  const patchLastAssistant = (patch: Partial<Message>) => {
     setMessages((prev) => {
       const next = prev.slice();
       const last = next[next.length - 1];
       if (last && last.role === 'assistant') {
-        next[next.length - 1] = { role: 'assistant', content: '' };
+        next[next.length - 1] = { ...last, ...patch };
       }
       return next;
     });
@@ -443,7 +359,7 @@ export default function AiAssistantPage() {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ session_id: sessionId, message: text, mode }),
+        body: JSON.stringify({ session_id: sessionId, message: text }),
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
@@ -496,9 +412,11 @@ export default function AiAssistantPage() {
           const lb = payload.label;
           if (typeof lb === 'string') setLevelLabel(lb);
         } else if (event === 'notice') {
-          // 大模型失败已降级：清掉半截内容，等降级结果流过来
-          clearLastAssistant();
-          setThinking(false);
+          // 只有「重生成」类通知才清空上一版，其它提示（如站外检索不可用）必须保留已生成内容
+          if (payload.retry === true) {
+            patchLastAssistant({ content: '' });
+            setThinking(true);
+          }
         } else if (event === 'done') {
           const sid = payload.session_id;
           if (typeof sid === 'number') setSessionId(sid);
@@ -589,40 +507,6 @@ export default function AiAssistantPage() {
       />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
-        {/* 快速 / 深度：二选一互斥，切换会随请求一起发给后端 */}
-        {MODES.map((m) => {
-          const on = mode === m.key;
-          return (
-            <button
-              key={m.key}
-              type="button"
-              aria-pressed={on}
-              title={m.hint}
-              onClick={() => setMode(m.key)}
-              className="tm-press"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                border: `1px solid ${on ? m.border : 'var(--tm-border-strong)'}`,
-                background: on ? m.key === 'deep' ? 'var(--tm-info-tint)' : 'var(--tm-tint)' : '#fff',
-                color: on ? m.color : TEXT_SECONDARY,
-                borderRadius: 999,
-                padding: '6px 15px',
-                fontSize: 13,
-                fontWeight: on ? 600 : 400,
-                fontFamily: 'inherit',
-                cursor: 'pointer',
-                boxShadow: on ? '0 2px 8px rgba(17,24,39,.06)' : 'none',
-                transition: 'all .18s var(--tm-ease)',
-              }}
-            >
-              {m.icon}
-              {m.label}
-            </button>
-          );
-        })}
-
         {/* 右下圆形发送：空输入时同色降透明，不切成灰色 */}
         <button
           type="button"
@@ -1049,7 +933,7 @@ export default function AiAssistantPage() {
     </aside>
   );
 
-  /* ── 空态：居中头像组 + 输入器 + 你可能想问 ── */
+  /* ── 空态：居中头像组 + 输入器 ── */
   const hero = (
     <div
       style={{
@@ -1059,31 +943,40 @@ export default function AiAssistantPage() {
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        padding: isMobile ? '20px 16px 16px' : '7vh 24px 20px',
+        padding: isMobile ? '20px 16px 16px' : '24px 24px 20px',
       }}
     >
-      <div style={{ width: '100%', maxWidth: 720, display: 'flex', flexDirection: 'column', flex: 1 }}>
+      <div style={{ width: '100%', maxWidth: 760, display: 'flex', flexDirection: 'column', flex: 1 }}>
+        {/* 主体（头像 + 名称 + 输入器）整体垂直居中，底部说明贴底 */}
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+          }}
+        >
         {/* 头像 + 名称：作为一组整体居中 */}
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 13,
+            gap: 15,
             justifyContent: 'center',
-            marginBottom: 24,
+            marginBottom: 28,
           }}
         >
           <span
             aria-hidden
             style={{
-              width: 52,
-              height: 52,
+              width: 64,
+              height: 64,
               borderRadius: '50%',
-              padding: 2,
+              padding: 2.5,
               background: `conic-gradient(from 210deg, ${BRAND}, #ffb08a, ${ACTION}, ${BRAND})`,
               display: 'flex',
               flexShrink: 0,
-              boxShadow: '0 8px 22px rgba(255,107,69,.22)',
+              boxShadow: '0 10px 26px rgba(255,107,69,.24)',
             }}
           >
             <span
@@ -1100,7 +993,7 @@ export default function AiAssistantPage() {
               <span
                 style={{
                   fontWeight: 800,
-                  fontSize: 18,
+                  fontSize: 22,
                   letterSpacing: '-0.5px',
                   backgroundImage: `linear-gradient(135deg, ${BRAND}, ${ACTION})`,
                   WebkitBackgroundClip: 'text',
@@ -1113,8 +1006,8 @@ export default function AiAssistantPage() {
             </span>
           </span>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.25 }}>TableMind AI</div>
-            <div style={{ color: TEXT_SECONDARY, fontSize: 12.5, marginTop: 2 }}>
+            <div style={{ fontSize: 24, fontWeight: 700, lineHeight: 1.25 }}>TableMind AI</div>
+            <div style={{ color: TEXT_SECONDARY, fontSize: 13.5, marginTop: 3 }}>
               最懂你的桌游 AI 助手
             </div>
           </div>
@@ -1157,79 +1050,11 @@ export default function AiAssistantPage() {
             </button>
           </div>
         )}
-
-        {/* 你可能想问 */}
-        <div style={{ marginTop: 30, width: '100%' }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: TEXT_SECONDARY, marginBottom: 14 }}>
-            你可能想问:
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {[...(loggedIn ? [...SUGGESTION_GROUPS, COLLECTION_GROUP] : SUGGESTION_GROUPS)].map((g) => (
-              <div key={g.key}>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    marginBottom: 9,
-                  }}
-                >
-                  <span style={{ color: g.accent, display: 'inline-flex', fontSize: 15 }} aria-hidden>
-                    {g.icon}
-                  </span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--tm-text-primary)' }}>
-                    {g.label}
-                  </span>
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {g.items.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      onClick={() => void send(s)}
-                      style={{
-                        textAlign: 'left',
-                        border: '1px solid var(--tm-border)',
-                        background: '#f7f8fa',
-                        color: 'var(--tm-text-primary)',
-                        borderRadius: 999,
-                        padding: '7px 13px',
-                        fontSize: 12.5,
-                        lineHeight: 1.4,
-                        fontFamily: 'inherit',
-                        cursor: 'pointer',
-                        transition: 'all .18s var(--tm-ease)',
-                      }}
-                      onMouseEnter={(e) => {
-                        const el = e.currentTarget;
-                        el.style.background = 'var(--tm-tint)';
-                        el.style.borderColor = g.accent;
-                        el.style.color = LINK;
-                        el.style.transform = 'translateY(-2px)';
-                        el.style.boxShadow = '0 6px 16px rgba(17,24,39,.08)';
-                      }}
-                      onMouseLeave={(e) => {
-                        const el = e.currentTarget;
-                        el.style.background = '#f7f8fa';
-                        el.style.borderColor = 'var(--tm-border)';
-                        el.style.color = 'var(--tm-text-primary)';
-                        el.style.transform = 'none';
-                        el.style.boxShadow = 'none';
-                      }}
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
         </div>
 
         {/* 底部说明：贴到内容区底部居中 */}
         <div
           style={{
-            marginTop: 'auto',
             paddingTop: 28,
             textAlign: 'center',
             color: TEXT_TERTIARY,
@@ -1278,10 +1103,9 @@ export default function AiAssistantPage() {
           <div style={{ fontWeight: 700, fontSize: 14.5, lineHeight: 1.2 }}>TableMind AI</div>
           <div style={{ color: TEXT_TERTIARY, fontSize: 11.5 }}>
             {busy
-              ? toolName ??
-                (thinking
-                  ? `正在思考… ${elapsed.toFixed(1)}s`
-                  : `正在生成… ${elapsed.toFixed(1)}s`)
+              ? toolName
+                ? `${toolName} ${elapsed.toFixed(1)}s`
+                : `${thinking ? '正在思考' : '正在生成'}… ${elapsed.toFixed(1)}s`
               : lastCost != null
                 ? `已就绪 · 上次用时 ${lastCost.toFixed(1)}s`
                 : '已就绪'}
@@ -1415,41 +1239,49 @@ export default function AiAssistantPage() {
             <div
               style={{
                 maxWidth: '78%',
-                padding: '11px 16px',
-                borderRadius: 14,
-                fontSize: 14,
-                lineHeight: 1.7,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                background: m.role === 'assistant' ? '#f7f8fa' : ACTION,
-                color: m.role === 'assistant' ? 'var(--tm-text-primary)' : '#fff',
-                borderTopLeftRadius: m.role === 'assistant' ? 4 : 14,
-                borderTopRightRadius: m.role === 'user' ? 4 : 14,
+                minWidth: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: m.role === 'user' ? 'flex-end' : 'flex-start',
+                gap: 6,
               }}
             >
-              {m.content ||
-                (toolName && i === messages.length - 1 ? (
-                  <span style={{ color: TEXT_TERTIARY, fontSize: 13 }}>{toolName}</span>
-                ) : thinking && i === messages.length - 1 ? (
-                  <span style={{ color: TEXT_TERTIARY, fontSize: 13 }}>
-                    正在思考… {elapsed.toFixed(1)}s
-                  </span>
-                ) : (
-                  <span aria-label="正在生成" style={{ display: 'inline-flex', gap: 4 }}>
-                    {[0, 1, 2].map((d) => (
-                      <i
-                        key={d}
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: '50%',
-                          background: BRAND,
-                          animation: `tm-fade-in .6s ${d * 0.15}s infinite alternate`,
-                        }}
-                      />
-                    ))}
-                  </span>
-                ))}
+              <div
+                style={{
+                  padding: '11px 16px',
+                  borderRadius: 14,
+                  fontSize: 14,
+                  lineHeight: 1.7,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  background: m.role === 'assistant' ? '#f7f8fa' : ACTION,
+                  color: m.role === 'assistant' ? 'var(--tm-text-primary)' : '#fff',
+                  borderTopLeftRadius: m.role === 'assistant' ? 4 : 14,
+                  borderTopRightRadius: m.role === 'user' ? 4 : 14,
+                }}
+              >
+                {m.content ||
+                  (busy && i === messages.length - 1 ? (
+                    <span style={{ color: TEXT_TERTIARY, fontSize: 13 }}>
+                      {toolName ?? '正在思考…'} {elapsed.toFixed(1)}s
+                    </span>
+                  ) : (
+                    <span aria-label="正在生成" style={{ display: 'inline-flex', gap: 4 }}>
+                      {[0, 1, 2].map((d) => (
+                        <i
+                          key={d}
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: '50%',
+                            background: BRAND,
+                            animation: `tm-fade-in .6s ${d * 0.15}s infinite alternate`,
+                          }}
+                        />
+                      ))}
+                    </span>
+                  ))}
+              </div>
             </div>
           </div>
         ))}
@@ -1556,7 +1388,8 @@ export default function AiAssistantPage() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ color: TEXT_TERTIARY, fontSize: 12.5, lineHeight: 1.6 }}>
-              这些偏好用于个性化桌游推荐。也可以直接对话，AI 会自动从中提取并积累偏好。
+              偏好只保存在你本人的账户下，不会展示给其他用户，仅用于个性化推荐。
+              你可以随时修改上面的字段、逐条删除下方 AI 自动积累的记录，或一键清空全部。
             </div>
 
             <div>
@@ -1659,19 +1492,46 @@ export default function AiAssistantPage() {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {prefEpisodes.slice().reverse().map((e) => (
-                  <div key={e.id} style={{ fontSize: 13, color: 'var(--tm-text-primary)', lineHeight: 1.5 }}>
-                    <Tag
-                      color={
-                        e.kind === 'preference' ? 'green' : e.kind === 'feedback' ? 'orange' : 'blue'
-                      }
-                      style={{ marginRight: 6 }}
+                  <div
+                    key={e.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      justifyContent: 'space-between',
+                      gap: 8,
+                      fontSize: 13,
+                      color: 'var(--tm-text-primary)',
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    <div>
+                      <Tag
+                        color={
+                          e.kind === 'preference' ? 'green' : e.kind === 'feedback' ? 'orange' : 'blue'
+                        }
+                        style={{ marginRight: 6 }}
+                      >
+                        {e.kind === 'preference' ? '偏好' : e.kind === 'feedback' ? '反馈' : '记录'}
+                      </Tag>
+                      {e.content}
+                      <span style={{ marginLeft: 6, fontSize: 11, color: TEXT_TERTIARY }}>
+                        {formatWhen(e.created_at)}
+                      </span>
+                    </div>
+                    <Popconfirm
+                      title="删除这条记录？"
+                      onConfirm={() => deleteEpisode(e.id)}
+                      okText="删除"
+                      cancelText="取消"
                     >
-                      {e.kind === 'preference' ? '偏好' : e.kind === 'feedback' ? '反馈' : '记录'}
-                    </Tag>
-                    {e.content}
-                    <span style={{ marginLeft: 6, fontSize: 11, color: TEXT_TERTIARY }}>
-                      {formatWhen(e.created_at)}
-                    </span>
+                      <Button
+                        type="text"
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        aria-label="删除该记录"
+                      />
+                    </Popconfirm>
                   </div>
                 ))}
               </div>

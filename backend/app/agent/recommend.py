@@ -39,8 +39,8 @@ from app.agent import llm
 from app.agent import pool as pool_mod
 from app.agent import rag
 from app.agent import tools as db_tools
-from app.agent import memory as mem_mod
 from app.agent.router import GAME_FOCUS_PAT as _GAME_FOCUS_PAT
+from app.agent.router import extract_type_keyword as _extract_type_keyword
 from app.core.config import settings
 from app.models.review import Review
 
@@ -59,8 +59,8 @@ _BATCH_REC_PAT = re.compile(
 )
 # 「在问某一款/某几款具体游戏」的信号：与批量信号互斥使用（口径见 router.GAME_FOCUS_PAT）
 
-# 同 rule_qa：推理模型的思维链与正文共用 max_tokens，预算需留足
-MAX_TOKENS_BY_MODE = {"fast": 2500, "deep": 3500}
+# 同 rule_qa：统一输出，不按模式区分预算（仅接口侧兜底上限）
+MAX_TOKENS = rag.ANSWER_MAX_TOKENS
 
 # 候选池真推无可推时的透明兜底（L4）：确定性文本，不走 LLM（快且绝不含糊）。
 # 原则：边界声明只能出现在这一层，且必须附带行动建议，不允许只甩一句「不在名单内」。
@@ -76,9 +76,11 @@ SYSTEM_PROMPT = """你是 TableMind 的桌游推荐助手。
 
 硬性要求：
 1. 只能从「候选游戏」里挑，禁止推荐列表以外的任何游戏，禁止编造游戏名。
-2. 输出 1 个主推荐 + 2 个备选，**按候选列表给出的 rank 顺序取前 3**，不要打乱顺序改选别的
-   （候选已由系统按相关度排好序，保证同一问题两次问得到同一答案）。
-3. 每款推荐末尾必须原样带上它的规则标记（{mark_yes} 或 {mark_no}），提醒用户能否追问规则。
+2. 输出 1 个主推荐 + 2 个备选，默认**按候选列表给出的 rank 顺序取前 3**，不要打乱顺序改选别的
+   （候选已由系统按相关度排好序，保证同一问题两次问得到同一答案）；
+   但必须先剔除不满足用户明确条件的款（见第 14 条），剔除后不足 3 款就只推实际符合的。
+3. 只输出最终推荐结果：每款一行，写清人数、时长与推荐理由。
+   **禁止输出筛选过程、排除说明、候选数量统计、脚注或「注：」**——这些内部决策不要给用户看。
 4. 只能依据所给资料写理由（人数、时长、分类、机制、适龄等真实字段），禁止编造评分或口碑。
 5. 若候选为空，说明本站暂无符合条件的桌游，并附一句可操作的调整建议（换人数/时长/类型），不要硬凑。
 6. 若用户提到的某款游戏不在「本站候选池名单」里，明确说明它不在本站候选池
@@ -96,37 +98,43 @@ SYSTEM_PROMPT = """你是 TableMind 的桌游推荐助手。
 13. 有参照游戏时（"类似 X"），推荐理由必须显式说明和 X 的**相似点 + 差异点**
     （例如「和 X 一样靠隐藏身份取胜，但 X 是 40 分钟一局，这款 15 分钟，节奏更快」），
     **不允许只罗列机制标签**——用户已经知道 X 的机制。
-
-回答模式：{mode_desc}"""
+14. 用户明确提出类型/机制条件（合作、竞争、聚会、卡牌、推理、德式、美式、策略等）时，
+    必须逐款核对候选的 categories 与 mechanics：不含该条件的候选**一律不得推荐**，
+    也不得放进主推位置。禁止用「可作为过渡」「适合新手团队」「虽然是对抗类但…」这类
+    说法把不符合条件的游戏包装成符合——用户要的是合作，递上一款竞争游戏就是答错。
+15. 符合用户明确条件的候选不足 3 款时，只推实际符合的，不要用不符合条件的款凑数；
+    **不要解释为什么不齐、不要输出「只有 N 款」这类统计**。"""
 
 FOCUS_SYSTEM_PROMPT = """你是 TableMind 的桌游资料助手。用户在问某一款（或某几款）具体桌游。
 
 1. 只能用「资料」里的事实作答；资料没写的（评分、口碑排名、价格、销量等）一律说
    「本站暂无该信息」，禁止推测或编造。
-2. 每款游戏末尾必须原样标注它的规则可用性标记：
-   {mark_yes} = 本站已收录该游戏规则书，可以直接追问玩法；
-   {mark_no} = 本站尚未收录该游戏规则书，只能答基本情况。
+2. 只输出最终结果：每款写清人数、时长与基本情况，不输出筛选过程、脚注或「注：」。
 3. 若用户还提到了不在「本站候选池名单」里的游戏，明确说明它不在本站候选池
    （不要说"搜索失败"或"无法查询"）。
 4. 中文作答，纯文本，禁止 Markdown 语法，用「1. 2. 3.」分点。
 5. 不要暴露推理过程。"""
 
 
-_models: dict[str, ChatOpenAI] = {}
+_model: ChatOpenAI | None = None
 
 
-def _get_model(mode: str = "fast") -> ChatOpenAI:
-    if mode not in _models:
-        _models[mode] = ChatOpenAI(
+def _get_model() -> ChatOpenAI:
+    global _model
+    if _model is None:
+        _model = ChatOpenAI(
             model=settings.LLM_MODEL,
             api_key=settings.LLM_API_KEY,
             base_url=settings.LLM_BASE_URL,
             # 低温：同一问题的「主推/备选」要稳定复现，不能两次问出两份不同名单
             temperature=0.3,
-            max_tokens=MAX_TOKENS_BY_MODE.get(mode, MAX_TOKENS_BY_MODE["fast"]),
+            max_tokens=MAX_TOKENS,
             streaming=True,
+            # 关闭思维链：qwen-plus 默认会把「逐条核验候选」的过程写进 reasoning_content，
+            # 若不显式关闭会被当成正文流给前端（实测用户看到一大段「用户明确需求为…」）。
+            extra_body={"enable_thinking": False},
         )
-    return _models[mode]
+    return _model
 
 
 async def collaborative_scores(db) -> dict[int, float] | None:
@@ -179,16 +187,21 @@ def _resume_slots(message: str, history, route):
     play_time_max = getattr(route, "play_time_max", None)
     play_time_min = getattr(route, "play_time_min", None)
     keyword = getattr(route, "keyword", None)
+    # 确定性路由与追问都可能漏掉类型词（「合作类」被当成半句话丢掉），这里补一次
+    if not keyword:
+        keyword = _extract_type_keyword(message)
     if not (players or play_time_max or play_time_min or keyword):
         players = rag._extract_players(message)
         play_time_max = rag._extract_play_time(message)
         play_time_min = rag._extract_min_play_time(message)
+        keyword = _extract_type_keyword(message)
     if not (players or play_time_max or play_time_min or keyword) and history:
         for role, content in reversed(history):
             if role == "user" and content and content.strip():
                 players = rag._extract_players(content)
                 play_time_max = rag._extract_play_time(content)
                 play_time_min = rag._extract_min_play_time(content)
+                keyword = _extract_type_keyword(content)
                 break
     return players, play_time_max, play_time_min, keyword
 
@@ -210,7 +223,6 @@ async def game_focus_stream(
     games: list,
     *,
     message: str,
-    mode: str = "fast",
     history: list[tuple[str, str]] | None = None,
     slots_text: str = "",
     picked_ids: set[int] | None = None,
@@ -240,9 +252,7 @@ async def game_focus_stream(
     if len(focus) == 1:
         g0 = focus[0]
         if picked_ids and g0.id not in picked_ids:
-            prefix = pool_mod.in_pool_but_not_picked_text(
-                g0.name, slots_text, pool_mod.mark_for(int(cov.get(g0.id, 0)))
-            ) + "\n\n"
+            prefix = pool_mod.in_pool_but_not_picked_text(g0.name, slots_text) + "\n\n"
         yield "info", json.dumps(
             {"text": f"已定位站内收录的《{g0.name}》，按站内资料回答"}, ensure_ascii=False
         )
@@ -256,9 +266,7 @@ async def game_focus_stream(
     prompt_msgs = [
         {
             "role": "system",
-            "content": FOCUS_SYSTEM_PROMPT.format(
-                mark_yes=pool_mod.RULE_MARK_YES, mark_no=pool_mod.RULE_MARK_NO
-            ),
+            "content": FOCUS_SYSTEM_PROMPT,
         },
     ]
     for role, content in (history or [])[-2:]:
@@ -283,7 +291,7 @@ async def game_focus_stream(
         async for kind, piece in llm.chat_stream(
             prompt_msgs,
             temperature=0.3,
-            max_tokens=MAX_TOKENS_BY_MODE.get(mode, MAX_TOKENS_BY_MODE["fast"]),
+            max_tokens=MAX_TOKENS,
             model=settings.LLM_MODEL,
             enable_thinking=False,
         ):
@@ -332,25 +340,22 @@ async def recommend_stream(
     message: str,
     *,
     user_id: int | None = None,
-    mode: str = "fast",
     route=None,
     history: list[tuple[str, str]] | None = None,
+    source_message: str | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
-    """跑一次推荐，产出 (event, payload)：info? → delta* → done。"""
-    players, play_time_max, play_time_min, keyword = _resume_slots(message, history, route)
+    """跑一次推荐，产出 (event, payload)：info? → delta* → done。
+
+    source_message：用户原话。主 Agent 会把 query 改写成更通顺的句子，常把
+    「1 人」「5 分钟」这类硬条件丢掉，槽位必须从原话里抽，否则条件被静默忽略。
+    """
+    players, play_time_max, play_time_min, keyword = _resume_slots(
+        source_message or message, history, route
+    )
     # LLM 抽出的 keyword 必须真的能当检索条件用，否则它会把候选池过滤成空集
     # （实测「我想找两人玩的游戏」抽到 keyword=「两人玩」→ 0 条）。
     keyword = await pool_mod.sanitize_keyword(db, keyword)
     slots_text = pool_mod.slot_desc(players, play_time_max, keyword, play_time_min)
-
-    # 个性化：先查用户画像 + 近期情景记忆（与 RAG 语义记忆分开取），复杂度上限用于硬过滤
-    personal = None
-    complexity_max = None
-    if user_id:
-        profile = await mem_mod.get_profile(db, user_id)
-        episodes = await mem_mod.get_recent_episodes(db, user_id)
-        personal = mem_mod.format_personalization(profile, episodes)
-        complexity_max = profile.max_complexity if profile else None
 
     ref = await _resolve_ref(db, message, history)
 
@@ -369,7 +374,6 @@ async def recommend_stream(
                 play_time_max=play_time_max,
                 play_time_min=play_time_min,
                 keyword=keyword,
-                complexity_max=complexity_max,
                 limit=CANDIDATE_N,
             )
             picked_ids = {int(c["id"]) for c in picked}
@@ -377,7 +381,6 @@ async def recommend_stream(
             db,
             named,
             message=message,
-            mode=mode,
             history=history,
             slots_text=slots_text,
             picked_ids=picked_ids,
@@ -394,7 +397,6 @@ async def recommend_stream(
         play_time_max=play_time_max,
         play_time_min=play_time_min,
         keyword=keyword,
-        complexity_max=complexity_max,
         limit=30,
     )
 
@@ -511,35 +513,6 @@ async def recommend_stream(
         )
 
     top = candidates[:CANDIDATE_N]
-    # 余量预告：让用户的追问有预期，也让「候选池边界」变成可控节奏而不是突然的终点
-    remaining = len(candidates) - len(top)
-
-    # 池口径：让用户知道「候选池是什么」，而不是以为系统随机决定有没有某款游戏
-    scope = (
-        f"按「{slots_text}」筛出 {len(top)} 款"
-        if not relaxed
-        else f"放宽条件后选出 {len(top)} 款"
-    )
-    tail = (
-        f"；池里同条件下还有 {remaining} 款没推过，想继续可以说「还有别的吗」"
-        if remaining > 0
-        else ""
-    )
-    yield "info", json.dumps(
-        {
-            "text": (
-                f"本次从本站候选池（共 {stats['total']} 款，"
-                f"{stats['with_rules']} 款可查规则）中{scope}{tail}"
-            )
-        },
-        ensure_ascii=False,
-    )
-
-    # 个性化提示：画像/情景已在上方查好，生成前告知用户
-    if personal:
-        yield "info", json.dumps(
-            {"text": "已结合你此前在站内的偏好进行推荐"}, ensure_ascii=False
-        )
 
     roster = await pool_mod.pool_roster_text(db)
     # 双保险：代码已统一排除，提示词再声明一次，防止漏网
@@ -587,20 +560,15 @@ async def recommend_stream(
         "候选游戏（均为本站真实收录，已按相关度排好序，请按 rank 取前 3）：\n{cands}\n\n"
         "用户的需求：{question}"
     )
-    if personal:
-        human = personal + "\n\n" + human
     prompt = ChatPromptTemplate.from_messages(
         [("system", SYSTEM_PROMPT), ("human", human)]
     )
-    chain = prompt | _get_model(mode) | StrOutputParser()
+    chain = prompt | _get_model() | StrOutputParser()
 
     total = 0
     try:
         async for chunk in chain.astream(
             {
-                "mode_desc": rag.MODE_DESC.get(mode, rag.MODE_DESC["fast"]),
-                "mark_yes": pool_mod.RULE_MARK_YES,
-                "mark_no": pool_mod.RULE_MARK_NO,
                 "cands": json.dumps(brief, ensure_ascii=False, indent=1),
                 "question": message,
             }

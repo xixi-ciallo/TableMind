@@ -30,6 +30,22 @@ def _norm(q: str) -> str:
     return re.sub(r"\s+", "", (q or "")).lower()[:200]
 
 
+def _chars(q: str) -> set[str]:
+    return set(_norm(q))
+
+
+def _overlap(a: str, b: str) -> float:
+    """字符集合 Jaccard：挡住「同一游戏、但问的是另一个东西」的近似命中。
+
+    实测「三国杀中装备牌有哪些」的缓存会把「防具里面不是还有个藤甲吗」判成近似问题
+    （embedding 余弦 ≥ 0.93），导致追问拿到上一轮的旧答案。
+    """
+    sa, sb = _chars(a), _chars(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
 def _key(game_id: int | None, q: str) -> str:
     return f"{game_id if game_id is not None else 'x'}:{_norm(q)}"
 
@@ -64,6 +80,11 @@ async def get(game_id: int | None, q: str) -> dict | None:
                     if c > bs:
                         bs, best = c, it
             if best and bs >= settings.ANSWER_CACHE_SIMILARITY:
+                cached_q = best.get("q") or ""
+                # 余弦高不代表问的是同一件事（同款游戏的问题天然接近），再用字符
+                # 集合重合度兜一层：低于 0.6 视为不同问题，宁可重新生成。
+                if cached_q and _overlap(q, cached_q) < 0.6:
+                    return None
                 return {**best, "hit": "similar", "sim": round(bs, 3)}
     return None
 
@@ -75,11 +96,13 @@ async def put(
     level: int,
     model: str | None,
     game_name: str | None = None,
+    citations: list[dict] | None = None,
 ) -> None:
     """写入缓存（仅命中明确层级时调用）。
 
     game_name 一并存下：命中缓存时要向前端回显「依据《X》的规则书」，
     只存 id 的话缓存分支只能给出 game=None（实测让 L6 别名用例误判为「没定位到游戏」）。
+    citations 也一并存下：缓存命中时仍要能展示引用溯源，否则同样的问题第二次问就没有来源了。
     """
     if not settings.ANSWER_CACHE_ENABLED or not text:
         return
@@ -92,8 +115,10 @@ async def put(
         "model": model,
         "ts": time.time(),
         "emb": emb,
+        "q": _norm(q),
         "game_id": game_id,
         "game_name": game_name,
+        "citations": citations or [],
     }
     if len(_CACHE) > _MAX:
         oldest = min(_CACHE, key=lambda k: _CACHE[k]["ts"])

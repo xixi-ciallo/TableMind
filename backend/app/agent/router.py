@@ -199,6 +199,45 @@ _ROUTE_PROMPT = """你是桌游助手的意图分类器。判断下面这条用�
 用户提问：{message}"""
 
 
+# 类型/机制词 → 站内词表里的规范词（均可在 board_games 的 categories/mechanics 里检索到）。
+# 为什么确定性路由也要抽类型词：这条路径原本只抽人数/时长，「4 人一小时内、合作类」里的
+# 「合作类」被整句丢掉 → 候选里混入竞争类游戏，模型只能硬凑（实测把《璀璨宝石》说成
+# 「适合新手团队过渡」）。「策略」这类泛词刻意不收，避免把非「抽象策略」标签的游戏全滤掉。
+_TYPE_WORD_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("合作", ("合作", "协作")),
+    ("竞争", ("竞争",)),
+    ("聚会", ("聚会", "派对")),
+    ("抽象策略", ("抽象",)),
+    ("牌库构筑", ("牌库构筑", "DBG")),
+    ("卡牌", ("卡牌",)),
+    ("推理", ("推理",)),
+    ("德式", ("德式",)),
+    ("美式", ("美式",)),
+)
+
+# 否定语境：「不要合作类」「除了卡牌」不是筛选条件
+_TYPE_NEG_PAT = re.compile(r"(不要|不想|不用|别|非|除了|不含|不想要)[^，。；,;]{0,6}$")
+
+
+def extract_type_keyword(message: str) -> str | None:
+    """从提问里抽出站内可检索的类型/机制词，抽不到返回 None。
+
+    只认词表里的词，且排除否定语境——宁可不过滤，也不能把用户明确排除的类型当成条件。
+    """
+    if not message:
+        return None
+    text = str(message)
+    for canonical, words in _TYPE_WORD_MAP:
+        for word in words:
+            idx = text.find(word)
+            if idx < 0:
+                continue
+            if _TYPE_NEG_PAT.search(text[:idx]):
+                continue
+            return canonical
+    return None
+
+
 def _slots_from_text(message: str) -> dict:
     """复用 rag 里已验证的槽位抽取，避免两套正则各写一遍。"""
     return {
@@ -206,6 +245,7 @@ def _slots_from_text(message: str) -> dict:
         "play_time_max": rag._extract_play_time(message),
         "play_time_min": rag._extract_min_play_time(message),
         "complexity_max": rag._extract_complexity(message),
+        "keyword": extract_type_keyword(message),
     }
 
 
@@ -244,11 +284,11 @@ def _get_model() -> ChatOpenAI:
     global _model
     if _model is None:
         _model = ChatOpenAI(
-            model=settings.LLM_MODEL,
+            model=settings.LLM_FAST_MODEL or settings.LLM_MODEL,
             api_key=settings.LLM_API_KEY,
             base_url=settings.LLM_BASE_URL,
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=1200,
             streaming=False,
         )
     return _model

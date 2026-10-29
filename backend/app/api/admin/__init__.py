@@ -1,7 +1,17 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import require_admin
-from app.api.admin import games, moderation, rule_books, rule_docs, stats, tags, users
+from app.api.admin import (
+    configs,
+    evals,
+    games,
+    moderation,
+    rule_books,
+    rule_docs,
+    stats,
+    tags,
+    users,
+)
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -15,3 +25,7 @@ router.include_router(
 router.include_router(rule_docs.router, tags=["admin-rule-docs"])
 # 规则书（原始文件）单独一路由：/rule-books 与 /games/{id}/rule-books
 router.include_router(rule_books.router, tags=["admin-rule-books"])
+# P3 评测中心：/evals/cases 与 /evals/runs
+router.include_router(evals.router, tags=["admin-evals"])
+# P4 系统配置：/configs 与 /configs/audits
+router.include_router(configs.router, tags=["admin-configs"])

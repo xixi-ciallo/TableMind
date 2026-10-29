@@ -127,7 +127,12 @@ async def _top_games(db: AsyncSession, limit: int = 8):
 async def _rating_distribution(db: AsyncSession):
     """本站玩家评分分布（1~10 分每档的评测条数）。"""
     try:
-        stmt = select(Review.rating, func.count()).group_by(Review.rating).order_by(Review.rating)
+        stmt = (
+            select(Review.rating, func.count())
+            .where(Review.rating.is_not(None))  # 只写评测正文的记录不参与评分分布
+            .group_by(Review.rating)
+            .order_by(Review.rating)
+        )
         rows = (await db.execute(stmt)).all()
         return [{"rating": int(r[0]), "count": int(r[1] or 0)} for r in rows]
     except Exception:
@@ -136,18 +141,32 @@ async def _rating_distribution(db: AsyncSession):
 
 
 async def _tag_usage(db: AsyncSession, limit: int = 10):
-    """标签使用量：game_tags 记录 × board_games JSONB 中真实引用次数。"""
+    """标签使用量：game_tags 记录 × board_games JSONB 中真实引用次数。
+
+    「推理」这类词在库里同时登记为分类和机制两条标签，直接按标签行输出会出现
+    两行同名数据；且同一款游戏可能分类、机制都含该词。这里按**名称合并**，
+    并以「出现该词的桌游款数（去重）」计数。
+    """
     try:
         tags = (await db.execute(select(GameTag))).scalars().all()
         rows = (await db.execute(select(BoardGame.categories, BoardGame.mechanics))).all()
 
         counter: dict[str, int] = {}
         for cats, mechs in rows:
-            for bucket in (cats or [], mechs or []):
-                for name in bucket:
-                    counter[name] = counter.get(name, 0) + 1
+            names = {n for n in (cats or []) if n} | {n for n in (mechs or []) if n}
+            for name in names:
+                counter[name] = counter.get(name, 0) + 1
 
-        out = [{"name": t.name, "type": t.type, "usage_count": counter.get(t.name, 0)} for t in tags]
+        type_by_name: dict[str, str] = {}
+        for t in tags:
+            # 同名标签合并为一行；mechanic 优先，只影响图表配色
+            if t.name not in type_by_name or t.type == "mechanic":
+                type_by_name[t.name] = t.type
+
+        out = [
+            {"name": name, "type": type_by_name[name], "usage_count": counter.get(name, 0)}
+            for name in type_by_name
+        ]
         out.sort(key=lambda x: (-x["usage_count"], x["name"]))
         return out[:limit]
     except Exception:

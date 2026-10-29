@@ -291,3 +291,127 @@ export interface RuleDocUploadResult {
   source?: string;
   detail?: string;
 }
+
+/* ============================ P3 评测中心 ============================ */
+
+/** 一条评测用例：问题 + 参考答案（用于 Context Recall）+ 可选标准切片 */
+export interface EvalCase {
+  id: number;
+  game_id: number | null;
+  game_name: string | null;
+  question: string;
+  reference_answer: string | null;
+  reference_chunks: number[] | null;
+  tags: string | null;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface EvalCasePayload {
+  game_id?: number | null;
+  question: string;
+  reference_answer?: string | null;
+  reference_chunks?: number[] | null;
+  tags?: string | null;
+  enabled?: boolean;
+}
+
+/** 批次汇总：四指标均值（0~1）、通过率、层级分布 */
+export interface EvalSummary {
+  cases: number;
+  scored: number;
+  failed: number;
+  pass_threshold: number;
+  pass_rate: number | null;
+  avg: {
+    context_recall?: number | null;
+    context_precision?: number | null;
+    faithfulness?: number | null;
+    answer_relevance?: number | null;
+    overall?: number | null;
+  };
+  levels: Record<string, number>;
+}
+
+export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface EvalRun {
+  id: number;
+  status: EvalRunStatus;
+  case_count: number;
+  completed_count: number;
+  config: Record<string, unknown> | null;
+  summary: EvalSummary | null;
+  error: string | null;
+  note: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/** 单条结果：四维分数已归一化到 0~1，null 表示该指标无法评估 */
+export interface EvalResultItem {
+  id: number;
+  case_id: number | null;
+  game_id: number | null;
+  question: string;
+  reference_answer: string | null;
+  level: number | null;
+  answer: string | null;
+  contexts: string[] | null;
+  citations: Array<Record<string, unknown>> | null;
+  context_recall: number | null;
+  context_precision: number | null;
+  faithfulness: number | null;
+  answer_relevance: number | null;
+  overall: number | null;
+  judge_reasons: {
+    reasons?: Record<string, string>;
+    raw?: string;
+    error?: string | null;
+  } | null;
+  error: string | null;
+  latency_ms: number | null;
+}
+
+export interface EvalRunDetail extends EvalRun {
+  results: EvalResultItem[];
+}
+
+/* ============================ P4 系统配置 ============================ */
+
+export type ConfigValue = boolean | number | string;
+export type ConfigKind = 'bool' | 'int' | 'float' | 'enum' | 'str';
+
+/** GET /api/admin/configs —— 一个可在线调整的参数（白名单） */
+export interface RuntimeConfigItem {
+  key: string;
+  group: string;
+  label: string;
+  description: string;
+  kind: ConfigKind;
+  /** 当前生效值（已按类型转换，可直接用于开关/下拉/数字框） */
+  value: ConfigValue;
+  /** .env 默认值，用于「恢复默认」后展示 */
+  default: ConfigValue;
+  /** db=被管理端覆盖；env=读取 .env */
+  source: 'db' | 'env';
+  options: string[] | null;
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  updated_at: string | null;
+  updated_by_name: string | null;
+}
+
+/** 变更历史 / 回滚记录 */
+export interface ConfigAuditItem {
+  id: number;
+  key: string;
+  action: 'set' | 'reset' | 'rollback' | string;
+  old_value: string | null;
+  new_value: string | null;
+  operator_id: number | null;
+  operator_name: string | null;
+  created_at: string;
+}

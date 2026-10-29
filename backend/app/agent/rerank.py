@@ -5,16 +5,18 @@
   属于**无监督的规则化重排**，没有引入模型。这在候选集小（单款游戏的规则书切片通常 < 40 段）、
   且 BM25 已能抓住稀有词时已经够用，也是命中率能到 hit@5≈96% 的原因。
 - 但当问题措辞与规则书差异大、或候选跨多款游戏时，规则化融合仍可能把正确切片压在 4~18 位。
-  真正的神经重排（cross-encoder / 大模型裁判）能进一步纠正。本项目把它做成**可插拔、默认关**，
-  既让「检索 → Rerank → 生成」的架构名实相符，又不影响现有已验证的链路（开启才有额外 LLM 调用）。
+  真正的神经重排（cross-encoder / 大模型裁判）能进一步纠正。本项目把它做成**可插拔**：
+  默认用 gte-rerank-v2（真实交叉编码器），也可切回 llm / score，或整体关闭。
 
-提供两种 method：
+提供三种 method：
+- "gte"：调用百炼 gte-rerank-v2（cross-encoder 语义重排），一次 HTTP 调用给全部候选打分。
+  这是**默认启用**的真实神经重排：分数直接来自 rerank 模型，比让大模型逐段写分数更稳、更便宜。
 - "llm"：点式重排。让大模型给每段候选打 1~5 的相关分（只比"相关/不相关"，不要求它生成），
   再按分数重排。代价是 N 段各调一次 LLM（或一次批量打分），故只在开启了 RERANK_ENABLED 时启用，
-  且 RERANK_TOP_N 控制在 15 以内。任何异常都回落到进入本函数前的顺序，绝不拖垮主流程。
+  且 RERANK_TOP_N 控制在 15 以内。
 - "score"：调用方已持有每段分数时，按分数重排（零额外开销，等价于一个更显式的排序封装）。
 
-纯函数 _pointwise_scores / _rerank_by_scores 不依赖 DB/LLM，可用 `python rerank.py` 直接自检。
+任何异常都回落到进入本函数前的顺序，绝不拖垮主流程。
 """
 from __future__ import annotations
 
@@ -23,10 +25,23 @@ import logging
 import re
 from collections.abc import Sequence
 
+import httpx
+
 from app.agent import llm
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
+
+# 复用的 httpx 异步客户端（连接池复用；rerank 是检索链路上的高频调用）。
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient()
+    return _client
+
 
 # 点式打分提示词：只判相关度，不要求模型复述内容，降低思维链/幻觉风险。
 _RERANK_PROMPT = """你是桌游规则检索的「相关性裁判」。下面会给若干段【规则说明书原文切片】和一个【问题】。
@@ -93,6 +108,69 @@ def _build_chunks_block(candidates: list[tuple[int, str]]) -> str:
     return "\n".join(lines)
 
 
+def _gte_order(scores: list[float | None]) -> list[int]:
+    """把 rerank 接口返回的分数整理成排序下标；缺失分数的候选排最后（保持相对顺序）。
+
+    纯函数，便于自检：接口按 index 返回分数，不保证顺序，故必须按 index 回填后自行排序。
+    """
+    return sorted(
+        range(len(scores)),
+        key=lambda i: (scores[i] is None, -(scores[i] or 0.0), i),
+    )
+
+
+async def _gte_rerank(
+    query: str, candidates: list[tuple[int, str]]
+) -> list[tuple[int, str]] | None:
+    """调用百炼 gte-rerank-v2 给候选打相关性分并重排；失败返回 None 由调用方回落。
+
+    请求体（DashScope 原生协议，非 OpenAI 兼容）：
+    {"model","input":{"query","documents"},"parameters":{"return_documents":false,"top_n"}}
+    返回：output.results = [{"index": 原下标, "relevance_score": 0~1}]。
+    """
+    if not (settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY) or not settings.RERANK_BASE_URL.strip():
+        return None
+    docs = [(text or "").strip() for _idx, text in candidates]
+    if not any(docs):
+        return None
+    payload = {
+        "model": settings.RERANK_MODEL,
+        "input": {"query": query, "documents": docs},
+        "parameters": {"return_documents": False, "top_n": len(docs)},
+    }
+    try:
+        resp = await _get_client().post(
+            settings.RERANK_BASE_URL,
+            headers={
+                "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=httpx.Timeout(settings.RERANK_TIMEOUT, connect=10),
+        )
+    except httpx.HTTPError as e:
+        log.warning("Rerank(gte) 网络异常，回落融合顺序：%s", e)
+        return None
+    if resp.status_code != 200:
+        log.warning(
+            "Rerank(gte) HTTP %s，回落融合顺序：%s", resp.status_code, resp.text[:200]
+        )
+        return None
+    try:
+        results = (resp.json().get("output") or {}).get("results") or []
+        scores: list[float | None] = [None] * len(candidates)
+        for item in results:
+            idx = int(item.get("index"))
+            if 0 <= idx < len(scores):
+                scores[idx] = float(item.get("relevance_score") or 0.0)
+    except (ValueError, TypeError, AttributeError) as e:
+        log.warning("Rerank(gte) 返回结构异常，回落融合顺序：%s", e)
+        return None
+    if all(s is None for s in scores):
+        return None
+    return [candidates[i] for i in _gte_order(scores)]
+
+
 async def rerank_rule_chunks(
     query: str,
     candidates: list[tuple[int, str]],
@@ -111,6 +189,11 @@ async def rerank_rule_chunks(
 
     method = method or settings.RERANK_METHOD
     top_n = top_n or settings.RERANK_TOP_N
+
+    # 0) gte-rerank-v2：一次调用给全部候选打分（调用方已用 RERANK_TOP_N 截断过）
+    if method == "gte":
+        reranked = await _gte_rerank(query, candidates)
+        return reranked if reranked else candidates
 
     # 1) 分数重排：调用方已经有可信分数时，零成本
     if method == "score" and scores is not None:
@@ -161,4 +244,7 @@ if __name__ == "__main__":
     sc = [0.2, 0.9, 0.5, 0.1]
     out = _rerank_by_scores(cands, sc)
     assert [i for i, _ in out] == [3, 7, 10, 1], out
+    # gte 分数可能缺失/乱序：缺失排最后，其余按分数降序
+    assert _gte_order([0.2, 0.9, None, 0.5]) == [1, 3, 0, 2]
+    assert _gte_order([None, None]) == [0, 1]
     print("rerank self-test OK:", [(i, round(s, 2)) for i, s in _pointwise_scores(sc)])

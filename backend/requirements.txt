@@ -12,5 +12,13 @@ email-validator
 redis
 langchain
 langchain-openai
+# 对话状态存储（LangGraph Store）：跨轮维护话题游戏/实体上下文，追问时自动补检索语境
+langgraph-checkpoint-postgres>=2.0
 pgvector
 httpx
+# httpx2（openai SDK 的 HTTP 层）在解压 br 响应时会传 output_buffer_limit，
+# brotli 1.0.x 的 process() 不接受该关键字，会导致所有 LangChain 流式调用抛
+# TypeError。必须 >=1.1。
+brotli>=1.1
+# BM25 中文分词（未安装时自动回落二元组，见 rag._tokenize）
+jieba

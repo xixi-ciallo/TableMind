@@ -312,13 +312,15 @@ async def build_docs(
         ).scalar() or -1
         start = int(last) + 1
 
-    vectors = await _embed(chunks)
+    vectors = await _embed([c.text for c in chunks])
     for i, c in enumerate(chunks):
         db.add(RuleDocument(
             game_id=book.game_id,
             rule_book_id=book_id,
             chunk_index=start + i,
-            content=c,
+            content=c.text,
+            parent_index=start + c.parent_index,
+            parent_text=c.parent_text,
             embedding=vectors[i] if vectors else None,
         ))
     if page_count:

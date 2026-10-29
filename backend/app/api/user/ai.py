@@ -19,12 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import llm, rag
 from app.agent import loop as agent_loop
+from app.agent import dialogue_state as dialogue_state_mod
 from app.agent import memory as mem_mod
 from app.agent import tools as db_tools
 from app.core.config import settings
 from app.api.deps import get_current_user, get_db
 from app.models.board_game import BoardGame
-from app.models.chat import ChatMessage, ChatSession
+from app.models.chat import AnswerFeedback, ChatMessage, ChatSession
 from app.models.user import User
 from app.schemas.chat import ChatRequest
 
@@ -45,18 +46,18 @@ _RULE_Q_PAT = re.compile(
     re.IGNORECASE,
 )
 
-# 推理模型的思维链也计入 max_tokens，按模式给不同上限
-MAX_TOKENS = {"fast": 1200, "deep": 2000}
+# 统一输出：提示词不限制字数，这里只是接口侧的兜底上限（推理模型的思维链也计入 token）
+MAX_TOKENS = rag.ANSWER_MAX_TOKENS
 
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _summarize(g: BoardGame, deep: bool = False) -> str:
+def _summarize(g: BoardGame) -> str:
     """把一款真实桌游整理成一段可直接展示的简介（只用库内真实字段）。
 
-    deep=True 时额外展开适龄、复杂度、分类与机制，并把介绍放长——对应前端「深度」模式。
+    展开适龄、复杂度、分类与机制，介绍按较长上限截断。
     """
     bits: list[str] = []
     if g.year_published:
@@ -71,17 +72,16 @@ def _summarize(g: BoardGame, deep: bool = False) -> str:
     head = f"《{g.name}》" + (f"（{' / '.join(bits)}）" if bits else "")
 
     extra: list[str] = []
-    if deep:
-        if g.min_age:
-            extra.append(f"适龄 {g.min_age}+")
-        if g.complexity:
-            extra.append(f"复杂度 {g.complexity}/5")
-        if g.categories:
-            extra.append("分类：" + "、".join(str(c) for c in g.categories[:4]))
-        if g.mechanics:
-            extra.append("机制：" + "、".join(str(m) for m in g.mechanics[:4]))
+    if g.min_age:
+        extra.append(f"适龄 {g.min_age}+")
+    if g.complexity:
+        extra.append(f"复杂度 {g.complexity}/5")
+    if g.categories:
+        extra.append("分类：" + "、".join(str(c) for c in g.categories[:4]))
+    if g.mechanics:
+        extra.append("机制：" + "、".join(str(m) for m in g.mechanics[:4]))
 
-    limit = 260 if deep else 60
+    limit = 260
     desc = (g.description or "").strip().replace("\n", " ")
     if len(desc) > limit:
         desc = desc[:limit] + "…"
@@ -133,17 +133,16 @@ async def _fallback_rule_snippets(
         return None
 
 
-async def _fallback_reply(db: AsyncSession, message: str, mode: str = "fast") -> str:
-    """降级路径：大模型不可用时，直接返回站内真实资料（按 mode 决定详略）。
+async def _fallback_reply(db: AsyncSession, message: str) -> str:
+    """降级路径：大模型不可用时，直接返回站内真实资料。
 
     先判意图：规则类问题（「XX 怎么玩」）优先给规则说明书原文摘录；
     取不到再回落到原来的「命中游戏名 → 给简介」逻辑。
     """
-    deep = mode == "deep"
 
     # 1) 规则类问题：本站 47 款均收录了规则说明书，直接给原文切片
     if _RULE_Q_PAT.search(message):
-        got = await _fallback_rule_snippets(db, message, k=3 if deep else 2)
+        got = await _fallback_rule_snippets(db, message, k=3)
         if got:
             game, chunks = got
             body = "\n\n".join(c.strip() for c in chunks if c and c.strip())
@@ -161,15 +160,14 @@ async def _fallback_reply(db: AsyncSession, message: str, mode: str = "fast") ->
     # 命中游戏名：直接给出该游戏真实资料
     hits = [g for g in games if g.name and g.name in message]
     if hits:
-        lines = ["你问的应该是这几款："] + [_summarize(g, deep) for g in hits[: (3 if deep else 2)]]
+        lines = ["你问的应该是这几款："] + [_summarize(g) for g in hits[:3]]
         lines.append(FALLBACK_TIP)
         return "\n\n".join(lines)
 
     # 未命中：按人数关键词过滤后推荐，否则给收录顺序靠前的真实游戏
-    take = 5 if deep else 3
-    picks = _filter_by_players(games, message)[:take] or games[:take]
+    picks = _filter_by_players(games, message)[:5] or games[:5]
     lines = ["这句话里没找到具体游戏名，先给你几款站内真实收录的桌游："] + [
-        _summarize(g, deep) for g in picks
+        _summarize(g) for g in picks
     ]
     lines.append(FALLBACK_TIP)
     return "\n\n".join(lines)
@@ -211,16 +209,21 @@ async def _load_history(db: AsyncSession, session_id: int, limit: int = 10) -> l
 async def _generate(
     db: AsyncSession,
     message: str,
-    mode: str,
     history: list[tuple[str, str]],
     user_id: int,
     game_id: int | None = None,
+    dialogue_state: dict | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
     """统一的回复生成：产出 (事件名, 内容)。
 
     优先级：Agent 工具调用循环 → 固定 RAG 工作流 → 站内检索兜底。
     事件为 'meta' / 'tool' / 'thinking' / 'delta' / 'notice' / 'error' / 'fallback'。
+    dialogue_state：由端点加载的对话状态，供追问自动携带上一轮话题。
     """
+    # 先发「思考中」，前端据此立刻开始计时：降级/兜底路径不会再有 thinking 事件，
+    # 若只等副 Agent 发，等待期间界面上就没有任何时间反馈。
+    yield "thinking", json.dumps({"text": "正在思考…"}, ensure_ascii=False)
+
     # 灰度：按比例把部分流量切到固定 RAG 路径，用于对比延迟/准确率（0=全走 Agent）
     use_agent = bool(llm.available() and settings.AGENT_ENABLED)
     if use_agent and settings.AI_CANARY_RATIO > 0 and random.random() < settings.AI_CANARY_RATIO:
@@ -232,10 +235,11 @@ async def _generate(
         yield "meta", json.dumps({"source": "agent", "model": llm.model_name()}, ensure_ascii=False)
         try:
             async for event, payload in agent_loop.run_agent_stream(
-                db, message, user_id=user_id, mode=mode, history=history, game_id=game_id
+                db, message, user_id=user_id, history=history, game_id=game_id,
+                dialogue_state=dialogue_state,
             ):
                 # 路由结果 / 依据层级 / 降级提示 / 正文，都要透给前端
-                if event in ("route", "level", "info", "notice", "tool", "delta"):
+                if event in ("route", "level", "info", "notice", "tool", "thinking", "delta", "citations"):
                     yield event, payload
             return
         except Exception as e:  # noqa: BLE001 - Agent 任何失败都降级，保证用户拿得到回答
@@ -244,7 +248,7 @@ async def _generate(
 
     # 2) 固定 RAG 工作流（改造前的路径，作为 Agent 的降级与关闭时的默认行为）
     messages = await rag.build_messages(
-        db, message, mode=mode, history=history, user_id=user_id, game_id=game_id
+        db, message, history=history, user_id=user_id, game_id=game_id
     )
 
     if llm.available():
@@ -252,12 +256,16 @@ async def _generate(
         thinking_sent = False
         try:
             async for kind, text in llm.chat_stream(
-                messages, temperature=0.6, max_tokens=MAX_TOKENS.get(mode, 1200)
+                messages,
+                temperature=0.6,
+                max_tokens=MAX_TOKENS,
+                # 统一关闭思维链：不使用推理模型，避免把推理过程透给用户
+                enable_thinking=False,
             ):
                 if kind == "reasoning":
                     if not thinking_sent:
                         thinking_sent = True
-                        yield "thinking", "正在思考…"
+                        yield "thinking", json.dumps({"text": "正在思考…"}, ensure_ascii=False)
                     continue
                 if text:
                     yield "delta", text
@@ -270,7 +278,7 @@ async def _generate(
             yield "error", e.message
 
     yield "meta", json.dumps({"source": "fallback", "model": None}, ensure_ascii=False)
-    reply = await _fallback_reply(db, message, mode)
+    reply = await _fallback_reply(db, message)
     yield "fallback", reply
 
 
@@ -296,31 +304,76 @@ async def chat(
     if len(msg) > MAX_MESSAGE_LEN:
         raise HTTPException(status_code=400, detail=f"单条消息不能超过 {MAX_MESSAGE_LEN} 字")
 
-    mode = data.mode if data.mode in ("fast", "deep") else "fast"
     session_id, history = await _prepare_session(db, current_user.id, data.session_id, msg)
+    # 加载对话状态（话题游戏/实体上下文/槽位），追问自动携带上一轮主题
+    state = await dialogue_state_mod.load(current_user.id, session_id)
 
     source = "fallback"
     model: str | None = None
     chunks: list[str] = []
-    async for event, payload in _generate(db, msg, mode, history, current_user.id, data.game_id):
+    citations: list[dict] = []
+    route_info: dict | None = None
+    level_info: dict | None = None
+    async for event, payload in _generate(
+        db, msg, history, current_user.id, data.game_id, dialogue_state=state
+    ):
         if event == "meta":
             info = json.loads(payload)
             source = info.get("source", "fallback")
             model = info.get("model")
         elif event == "delta":
             chunks.append(payload)
+        elif event == "citations":
+            try:
+                citations = json.loads(payload).get("items") or []
+            except (ValueError, AttributeError):
+                citations = []
         elif event == "fallback":
             chunks = [payload]
+            citations = []
+        elif event == "route":
+            route_info = json.loads(payload)
+        elif event == "level":
+            level_info = json.loads(payload)
+            if level_info.get("fallback"):
+                citations = []
+        elif event == "notice":
+            try:
+                info = json.loads(payload)
+            except ValueError:
+                info = {}
+            if not info.get("keep_sources"):
+                citations = []
 
     reply = "".join(chunks).strip() or "抱歉，这次没能生成回答，请再试一次。"
-    db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
+    assistant_msg = ChatMessage(
+        session_id=session_id,
+        role="assistant",
+        content=reply,
+        citations=citations or None,
+    )
+    db.add(assistant_msg)
+    await db.flush()
     await db.commit()
+
+    # 对话状态回写（best-effort：未启用/失败只记日志，不影响回复）
+    new_state = dialogue_state_mod.update_from_turn(
+        state, message=msg, route=route_info, level=level_info
+    )
+    await dialogue_state_mod.save(current_user.id, session_id, new_state)
 
     # 蒸馏用户记忆（best-effort 后台任务，使用独立会话，不阻塞回复）
     if settings.MEMORY_DISTILL_ENABLED and current_user.id and reply:
         asyncio.create_task(mem_mod.distill_from_exchange(current_user.id, msg, reply))
 
-    return {"session_id": session_id, "reply": reply, "source": source, "model": model}
+    return {
+        "session_id": session_id,
+        "message_id": assistant_msg.id,
+        "reply": reply,
+        "source": source,
+        "model": model,
+        "citations": citations,
+    }
 
 
 @router.post("/chat/stream")
@@ -336,57 +389,127 @@ async def chat_stream(
     if len(msg) > MAX_MESSAGE_LEN:
         raise HTTPException(status_code=400, detail=f"单条消息不能超过 {MAX_MESSAGE_LEN} 字")
 
-    mode = data.mode if data.mode in ("fast", "deep") else "fast"
     # 注意：session 与用户消息先落库并提交，流式期间不再占用事务
     session_id, history = await _prepare_session(db, current_user.id, data.session_id, msg)
 
     async def event_stream() -> AsyncIterator[str]:
+        # 加载对话状态（话题游戏/实体上下文/槽位），追问自动携带上一轮主题
+        state = await dialogue_state_mod.load(current_user.id, session_id)
         chunks: list[str] = []
+        citations: list[dict] = []
         source = "fallback"
         model: str | None = None
         intent = None
+        route_info: dict | None = None
+        level_info: dict | None = None
 
-        async for event, payload in _generate(db, msg, mode, history, current_user.id, data.game_id):
+        async for event, payload in _generate(
+            db, msg, history, current_user.id, data.game_id, dialogue_state=state
+        ):
             if event == "meta":
                 info = json.loads(payload)
                 source = info.get("source", "fallback")
                 model = info.get("model")
                 yield _sse("meta", {"session_id": session_id, "source": source, "model": model})
             elif event == "thinking":
-                yield _sse("thinking", {"text": payload})
+                # payload 有两种形态：早期是纯文本，Orchestrator 发的是 JSON；
+                # 统一解析成对象再下发，避免前端收到 {"text":"{\"text\":...}"} 这种二次编码。
+                try:
+                    info = json.loads(payload)
+                except (ValueError, TypeError):
+                    info = None
+                yield _sse("thinking", info if isinstance(info, dict) else {"text": payload})
             elif event == "tool":
                 # Agent 正在调用工具，前端可展示"正在查询…"
                 yield _sse("tool", {"text": payload})
             elif event == "delta":
                 chunks.append(payload)
                 yield _sse("delta", {"text": payload})
+            elif event == "citations":
+                try:
+                    info = json.loads(payload)
+                except (ValueError, TypeError):
+                    info = {}
+                citations = info.get("items") or []
+                yield _sse("citations", info)
             elif event == "notice":
-                yield _sse("notice", json.loads(payload))
+                try:
+                    info = json.loads(payload)
+                except (ValueError, TypeError):
+                    info = {"text": payload}
+                # 非「保留引用」的提示意味着上一版回答不再可信，引用一并清空
+                if not info.get("keep_sources"):
+                    if citations:
+                        citations = []
+                        yield _sse("citations", {"items": [], "count": 0})
+                # retry：前端会清空气泡重放，这里同步清掉已累积文本，
+                # 保证落库/回显的是最终展示的那一版（如站外检索结果）
+                if info.get("retry") is True:
+                    chunks = []
+                yield _sse("notice", info)
             elif event == "info":
                 yield _sse("info", json.loads(payload))
             elif event == "level":
                 # 规则问答的依据层级（L1结构化 / L2规则书 / L3 BGG / L4未验证）
-                yield _sse("level", json.loads(payload))
+                try:
+                    level_info = json.loads(payload)
+                except (ValueError, KeyError):
+                    level_info = None
+                if level_info and level_info.get("fallback") and citations:
+                    citations = []
+                    yield _sse("citations", {"items": [], "count": 0})
+                yield _sse("level", level_info or {})
             elif event == "route":
                 try:
-                    intent = json.loads(payload).get("intent")
+                    route_info = json.loads(payload)
+                    intent = route_info.get("intent")
                 except (ValueError, KeyError):
+                    route_info = None
                     intent = None
-                yield _sse("route", json.loads(payload))
+                yield _sse("route", route_info or {})
             elif event == "error":
                 chunks = []
+                citations = []
+                yield _sse("citations", {"items": [], "count": 0})
                 yield _sse("notice", {"text": payload})
             elif event == "fallback":
                 chunks = [payload]
-                yield _sse("delta", {"text": payload})
+                citations = []
+                yield _sse("citations", {"items": [], "count": 0})
+                # 分片下发：整段一次性塞给前端会表现为「突然弹出整段」，没有打字感
+                for i in range(0, len(payload), 24):
+                    yield _sse("delta", {"text": payload[i : i + 24]})
+                    await asyncio.sleep(0.015)
 
         reply = "".join(chunks).strip() or "抱歉，这次没能生成回答，请再试一次。"
-        db.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
+        assistant_msg = ChatMessage(
+            session_id=session_id,
+            role="assistant",
+            content=reply,
+            citations=citations or None,
+        )
+        db.add(assistant_msg)
+        await db.flush()
         await db.commit()
+        # 对话状态回写（best-effort：未启用/失败只记日志，不影响回复）
+        new_state = dialogue_state_mod.update_from_turn(
+            state, message=msg, route=route_info, level=level_info
+        )
+        await dialogue_state_mod.save(current_user.id, session_id, new_state)
         # 蒸馏用户记忆（best-effort 后台任务，使用独立会话，不阻塞回复）
         if settings.MEMORY_DISTILL_ENABLED and current_user.id and reply:
             asyncio.create_task(mem_mod.distill_from_exchange(current_user.id, msg, reply))
-        yield _sse("done", {"session_id": session_id, "reply": reply, "source": source, "model": model})
+        yield _sse(
+            "done",
+            {
+                "session_id": session_id,
+                "message_id": assistant_msg.id,
+                "reply": reply,
+                "source": source,
+                "model": model,
+                "citations": citations,
+            },
+        )
 
     return StreamingResponse(
         event_stream(),
@@ -505,9 +628,81 @@ async def session_messages(
             .order_by(ChatMessage.id)
         )
     ).scalars().all()
+
+    # 当前用户对这些回答的反馈（用于前端回显点赞/点踩状态）
+    feedback_map: dict[int, int] = {}
+    if msgs:
+        rows = (
+            await db.execute(
+                select(AnswerFeedback.message_id, AnswerFeedback.rating).where(
+                    AnswerFeedback.user_id == current_user.id,
+                    AnswerFeedback.message_id.in_([m.id for m in msgs]),
+                )
+            )
+        ).all()
+        feedback_map = {int(mid): int(rating) for mid, rating in rows}
+
     return [
-        {"role": m.role, "content": m.content, "created_at": m.created_at} for m in msgs
+        {
+            "id": m.id,
+            "role": m.role,
+            "content": m.content,
+            "citations": m.citations or [],
+            "feedback": feedback_map.get(m.id),
+            "created_at": m.created_at,
+        }
+        for m in msgs
     ]
+
+
+class AnswerFeedbackIn(BaseModel):
+    """答案反馈请求体：rating 只能 1（有用）或 -1（没用）。"""
+
+    rating: int = Field(..., ge=-1, le=1)
+    reason: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/messages/{message_id}/feedback")
+async def submit_answer_feedback(
+    message_id: int,
+    data: AnswerFeedbackIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """对某条助手回答点赞/点踩；同一用户重复提交则覆盖。"""
+    if data.rating not in (-1, 1):
+        raise HTTPException(status_code=400, detail="rating 只能是 1 或 -1")
+
+    msg = await db.get(ChatMessage, message_id)
+    if msg is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    session = await db.get(ChatSession, msg.session_id)
+    if session is None or session.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    if msg.role != "assistant":
+        raise HTTPException(status_code=400, detail="只能对助手回答反馈")
+
+    row = (
+        await db.execute(
+            select(AnswerFeedback).where(
+                AnswerFeedback.message_id == message_id,
+                AnswerFeedback.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = AnswerFeedback(
+            message_id=message_id,
+            user_id=current_user.id,
+            rating=data.rating,
+            reason=data.reason,
+        )
+        db.add(row)
+    else:
+        row.rating = data.rating
+        row.reason = data.reason
+    await db.commit()
+    return {"ok": True, "message_id": message_id, "rating": row.rating}
 
 
 class MemoryUpdate(BaseModel):
@@ -587,5 +782,20 @@ async def clear_memory(
             mem_mod.UserMemoryEpisode.user_id == current_user.id
         )
     )
+    await db.commit()
+    return {"deleted": True}
+
+
+@router.delete("/memory/episodes/{episode_id}")
+async def delete_memory_episode(
+    episode_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """删除一条自动积累的交互记录（只能删自己的）。"""
+    ep = await db.get(mem_mod.UserMemoryEpisode, episode_id)
+    if ep is None or ep.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    await db.delete(ep)
     await db.commit()
     return {"deleted": True}

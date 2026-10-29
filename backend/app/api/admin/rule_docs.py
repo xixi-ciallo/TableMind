@@ -108,15 +108,15 @@ def _to_simplified(text: str) -> str:
 
 async def _ocr_image(raw: bytes) -> str:
     """调用视觉大模型识别规则书图片中的文字。"""
-    if not getattr(settings, "LLM_API_KEY", None):
-        raise HTTPException(400, "未配置 LLM_API_KEY，无法识别图片，请改传 PDF 或文本")
+    if not (settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY):
+        raise HTTPException(400, "未配置 DASHSCOPE_API_KEY，无法识别图片，请改传 PDF 或文本")
     try:
         import httpx
     except ImportError as e:  # pragma: no cover
         raise HTTPException(500, "服务端未安装 httpx，无法调用视觉模型") from e
 
     b64 = await asyncio.to_thread(_encode_image, raw)
-    base = (settings.LLM_BASE_URL or "").rstrip("/")
+    base = (settings.DASHSCOPE_BASE_URL or "").rstrip("/")
 
     last_err = ""
     content = ""
@@ -138,7 +138,7 @@ async def _ocr_image(raw: bytes) -> str:
             async with httpx.AsyncClient(timeout=180) as client:
                 resp = await client.post(
                     f"{base}/chat/completions",
-                    headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
+                    headers={"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY}"},
                     json=payload,
                 )
         except Exception as e:  # noqa: BLE001
@@ -195,30 +195,34 @@ async def _extract_text(filename: str, raw: bytes) -> tuple[str, str]:
     raise HTTPException(400, "无法识别文件编码，请上传 UTF-8 文本、PDF 或规则书图片")
 
 
-def _split(text: str) -> tuple[dict, list[str]]:
+def _split(text: str) -> tuple[dict, list[rulebook.PreparedChunk]]:
     """语义分块（委托给 app/agent/rulebook.py）。
 
     返回 (frontmatter 元数据, 切片列表)：
     - 有 Markdown 标题时按标题切，每片带「《游戏名》/ 章节路径」上下文头；
-    - 无标题的纯文本（OCR 稿、老格式）退化为按段落打包 + 重叠，仍不硬切段落。
+    - 无标题的纯文本（OCR 稿、老格式）退化为按段落打包 + 重叠，仍不硬切段落；
+    - 每片同时携带父章节（parent_index / parent_text），供检索时父块回填。
     """
     return rulebook.chunk_rule_doc(text)
 
 
 async def _embed(texts: list[str]) -> list[list[float]] | None:
-    """有 LLM_API_KEY 时调用 embedding 接口；否则返回 None。
+    """有百炼密钥时调用 embedding 接口；否则返回 None。
 
     按批调用（百炼 embedding 接口支持 input 数组），避免上百片逐个请求导致
     上传超时；批量失败时自动回退为逐条调用，保证成功率优先。
     """
-    if not getattr(settings, "LLM_API_KEY", None):
+    if not (settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY):
         return None
     try:
         from openai import AsyncOpenAI
     except ImportError:
         return None
 
-    client = AsyncOpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL)
+    client = AsyncOpenAI(
+        api_key=settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY,
+        base_url=settings.DASHSCOPE_BASE_URL,
+    )
     model = getattr(settings, "EMBEDDING_MODEL", "text-embedding-v4")
     dim = getattr(settings, "EMBEDDING_DIM", None)
     extra = {"dimensions": dim} if dim else {}
@@ -226,7 +230,8 @@ async def _embed(texts: list[str]) -> list[list[float]] | None:
 
     out: list[list[float]] = []
     for i in range(0, len(texts), BATCH):
-        batch = [t[:8000] for t in texts[i : i + BATCH]]
+        # 百炼 text-embedding-v1 单条输入上限 2048，超长会被整个批次拒绝
+        batch = [t[:2000] for t in texts[i : i + BATCH]]
         try:
             resp = await client.embeddings.create(model=model, input=batch, **extra)
             out.extend(d.embedding for d in sorted(resp.data, key=lambda d: d.index))
@@ -283,12 +288,14 @@ async def upload_rule_doc(
         # 整本替换：先清空旧切片，避免新旧混在一起
         await db.execute(delete(RuleDocument).where(RuleDocument.game_id == game_id))
 
-    vectors = await _embed(chunks)
+    vectors = await _embed([c.text for c in chunks])
     for i, c in enumerate(chunks):
         db.add(RuleDocument(
             game_id=game_id,
             chunk_index=start + i,
-            content=c,
+            content=c.text,
+            parent_index=start + c.parent_index,
+            parent_text=c.parent_text,
             embedding=vectors[i] if vectors else None,
         ))
     await db.commit()
@@ -457,8 +464,8 @@ async def delete_rule_chunk(
 @router.post("/games/{game_id}/rule-docs/reembed", response_model=RuleDocStatus)
 async def reembed_rule_docs(game_id: int, db: AsyncSession = Depends(get_db)):
     """给缺向量的切片补 embedding（上传时未配 Key / 接口抖动导致漏向量时用于兜底）。"""
-    if not getattr(settings, "LLM_API_KEY", None):
-        raise HTTPException(400, "未配置 LLM_API_KEY，无法生成向量")
+    if not (settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY):
+        raise HTTPException(400, "未配置 DASHSCOPE_API_KEY，无法生成向量")
 
     rows = (
         await db.execute(

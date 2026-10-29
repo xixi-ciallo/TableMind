@@ -24,7 +24,7 @@ async def _recalc_game_rating(db: AsyncSession, game_id: int | None) -> None:
         return
     row = (
         await db.execute(
-            select(func.avg(Review.rating), func.count(Review.id)).where(
+            select(func.avg(Review.rating), func.count(Review.rating)).where(
                 Review.game_id == game_id
             )
         )

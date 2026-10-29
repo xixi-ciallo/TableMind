@@ -1,15 +1,19 @@
-"""Agent 编排层：意图路由 → 分发到「规则问答」或「桌游推荐」两条独立流水线。
+"""Agent 编排层：主 Agent 编排（LLM 驱动派发）→ 回落确定性 Router → 两条独立流水线。
 
-为什么从自主工具循环（create_react_agent）改成 Router：
-两条能力的实现路径差异极大——规则问答是「检索 + 带引用生成」，推荐是「过滤 + 排序 + 写理由」。
-让模型每次自主决定调哪个工具，只会把不确定性、token 和延迟都抬上去，
-而这两条路径本身都是确定性流水线。Router 更可控、可评测、更省。
+层次（自上而下，任一层失败都回落下一层，保证永不空答）：
+1. Orchestrator（真 Agent）：LLM 带 2 个 function-calling 工具（规则/推荐副 Agent），
+   由模型决定调 1 个还是 2 个、并综合复合意图。见 agent/orchestrator.py。
+2. 确定性 Router（兜底）：关键词优先 + LLM 结构化兜底，二选一派发到下面两条流水线。
+3. 两条流水线：规则问答（检索 + 带引用生成）/ 桌游推荐（过滤 + 排序 + 写理由）。
 
-LangChain 仍然在用，只是用在了真正需要它的地方：
-- 意图分类：ChatOpenAI.with_structured_output（结构化输出）
-- 两条流水线的生成：LCEL 链（prompt | model | StrOutputParser）流式输出
+为什么主 Agent 之下仍保留确定性 Router 作兜底：自主派发是新加的，任何 LLM 失败
+（额度/超时/不可用）都要能无缝退回可控的确定性路径，而不是整条链路崩掉。
 
-有界性（C5）：单次路由 + 单条流水线，无自主循环；整体有墙钟上限兜底。
+历史：早期曾用自主工具循环（create_react_agent），后因两条路径确定性都极高、让模型
+每次自主选工具只增不确定/token/延迟而废弃，改为 Router；本次在此之上再包一层
+Orchestrator 以补上「复合意图可分解」这一真实缺口。
+
+有界性（C5）：主 Agent 最多 2 次工具调用 + 墙钟上限；Router 单次路由 + 单条流水线，无自主循环。
 任何异常一律上抛给 ai.py，由它回落到既有 RAG 工作流 / 站内检索，保证用户拿得到回答。
 """
 from __future__ import annotations
@@ -25,6 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import rag
 from app.agent import recommend, router as router_mod, rule_qa
+from app.agent import orchestrator as orch_mod
+from app.agent import llm
+from app.core.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -44,18 +51,38 @@ async def run_agent_stream(
     message: str,
     *,
     user_id: int | None = None,
-    mode: str = "fast",
     history: list[tuple[str, str]] | None = None,
     game_id: int | None = None,
     trace_id: str | None = None,
+    dialogue_state: dict | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
     """跑一次完整流程，产出 (event, payload)。
 
     事件：route（路由结果）/ level（规则问答的依据层级）/ notice（如实说明的降级提示）
          / delta（正文）/ done（结束）。
+    dialogue_state：对话状态（话题游戏/实体上下文/槽位），由 ai.py 加载与回写，
+    用于追问自动带上上一轮主题（如「那掷出 7 但没资源呢」→ 带上卡坦岛+强盗）。
     """
     trace = trace_id or uuid.uuid4().hex[:12]
     t0 = time.monotonic()
+
+    # ── 主 Agent 编排（真 Agent）：LLM 驱动派发 ──
+    # 优先走 Orchestrator；任何失败/超时/关闭都回落到下方确定性 Router，保证永不空答。
+    if llm.available() and getattr(settings, "AGENT_ORCHESTRATOR_ENABLED", True):
+        try:
+            async for event, payload in orch_mod.run_orchestrator_stream(
+                db,
+                message,
+                user_id=user_id,
+                history=history,
+                game_id=game_id,
+                trace_id=trace,
+                dialogue_state=dialogue_state,
+            ):
+                yield event, payload
+            return
+        except Exception as e:  # noqa: BLE001 - Orchestrator 失败，回落确定性 Router
+            log.warning("[trace=%s] Orchestrator 失败，回落确定性 Router：%s", trace, e)
 
     route = await router_mod.route(message, history)
 
@@ -107,17 +134,16 @@ async def run_agent_stream(
         stream = rule_qa.answer_stream(
             db,
             message,
-            mode=mode,
             history=history,
             game_id=game_id,
             game_hint=route.game_hint,
+            dialogue_state=dialogue_state,
         )
     else:
         stream = recommend.recommend_stream(
             db,
             message,
             user_id=user_id,
-            mode=mode,
             route=route,
             history=history,
         )

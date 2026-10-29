@@ -232,7 +232,7 @@ async def recalc_rating(game_id: int, db: AsyncSession = Depends(get_db)):
 
     row = (
         await db.execute(
-            select(func.avg(Review.rating), func.count(Review.id)).where(
+            select(func.avg(Review.rating), func.count(Review.rating)).where(
                 Review.game_id == game_id
             )
         )

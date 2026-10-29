@@ -77,7 +77,8 @@ type MarkedPost = {
 type MyReview = {
   id: number;
   game_id: number;
-  rating: number;
+  /** 只写了评测正文时没有分数 */
+  rating: number | null;
   content: string | null;
   like_count: number;
   comment_count: number;
@@ -811,7 +812,9 @@ export default function ProfilePage() {
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                           <span style={{ fontWeight: 700 }}>{r.game_name ?? '桌游'}</span>
-                          <span style={{ color: 'var(--tm-action)', fontWeight: 700 }}>{r.rating} 分</span>
+                          <span style={{ color: 'var(--tm-action)', fontWeight: 700 }}>
+                            {r.rating != null ? `${r.rating} 分` : '未评分'}
+                          </span>
                         </div>
                         {r.content && (
                           <div

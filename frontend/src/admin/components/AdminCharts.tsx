@@ -99,20 +99,34 @@ export function LineTrendChart({
   }, [labels, series]);
 
   // 挂载 / 更新 / 销毁 ECharts 实例
+  const optionRef = useRef(option);
+  optionRef.current = option;
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const chart = echarts.init(el);
-    chartRef.current = chart;
-    chart.setOption(option);
+
+    // 首帧容器可能还没有宽度（栅格/父级动画尚未完成），此时 init 会报
+    // "Can't get DOM width or height" 并留下空白图。改为等尺寸就绪后再初始化。
+    let chart: echarts.ECharts | null = null;
+    const ensure = () => {
+      if (chart || !el.clientWidth || !el.clientHeight) return;
+      chart = echarts.init(el);
+      chartRef.current = chart;
+      chart.setOption(optionRef.current);
+    };
+    ensure();
 
     // 容器尺寸变化时自适应（卡片随窗口缩放）
-    const ro = new ResizeObserver(() => chart.resize());
+    const ro = new ResizeObserver(() => {
+      ensure();
+      chart?.resize();
+    });
     ro.observe(el);
 
     return () => {
       ro.disconnect();
-      chart.dispose();
+      chart?.dispose();
       chartRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

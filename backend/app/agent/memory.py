@@ -24,6 +24,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import llm
+from app.core.config import settings
 from app.core.database import async_session_factory
 from app.models.user_memory import UserMemoryEpisode, UserProfile
 
@@ -235,7 +236,10 @@ async def distill_from_exchange(user_id: int, message: str, reply: str) -> None:
             {"role": "user", "content": f"用户消息：{message}\n\nAI 回复：{reply}"},
         ]
         raw = await llm.chat_complete(
-            prompt, temperature=0.2, max_tokens=DISTILL_MAX_TOKENS
+            prompt,
+            temperature=0.2,
+            max_tokens=DISTILL_MAX_TOKENS,
+            model=settings.LLM_FAST_MODEL or settings.LLM_MODEL,
         )
         data = _extract_json(raw)
         if not data:

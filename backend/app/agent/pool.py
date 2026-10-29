@@ -214,6 +214,9 @@ async def sanitize_keyword(db, keyword: str | None) -> str | None:
 
     保留条件（满足任一）：完全等于某站内词；是某站内词的子串（「卡牌」⊂「卡牌抽取」）；
     或长度 ≤ 4 且包含某个站内词（「合作类」含「合作」）。
+
+    命中第三类时必须**返回站内原词**而不是用户原话：词表里是 categories/mechanics 的
+    子串匹配，「合作类」直接去 ilike 匹配不到「合作」，等于条件被静默丢掉。
     """
     if not keyword:
         return None
@@ -225,8 +228,10 @@ async def sanitize_keyword(db, keyword: str | None) -> str | None:
     for v in await _retrieval_vocab(db):
         if not v:
             continue
-        if low == v or low in v or (len(low) <= 4 and v in low):
+        if low == v or low in v:
             return kw
+        if len(low) <= 4 and v in low:
+            return v
 
     log.info("丢弃无法用于检索的 keyword：'%s'（站内词表无对应）", kw)
     return None
@@ -309,9 +314,9 @@ def out_of_scope_text(name: str, stats: dict) -> str:
     )
 
 
-def in_pool_but_not_picked_text(game_name: str, players_slots: str, rule_mark: str) -> str:
+def in_pool_but_not_picked_text(game_name: str, players_slots: str) -> str:
     """池内、但不在本次筛选结果里的解释（避免被误读成「本站没有」）。"""
     return (
         f"说明：这次是按「{players_slots}」筛的，所以《{game_name}》不在本次推荐列表里；"
-        f"但它**在本站候选池内**（{rule_mark}），下面按站内已收录的资料说它。"
+        f"但它在本站候选池内，下面按站内已收录的资料说它。"
     )

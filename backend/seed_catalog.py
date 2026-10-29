@@ -56,6 +56,17 @@ def to_int(v, default=0):
             return default
 
 
+def as_list(v) -> list:
+    """catalog.json 里标签可能是 JSON 字符串或数组，统一成数组再写入 JSONB。"""
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            return parsed if isinstance(parsed, list) else []
+        except ValueError:
+            return []
+    return v or []
+
+
 async def seed_games(session: AsyncSession, catalog: list[dict]) -> int:
     """按 catalog 的固定 id 灌库，保证前端 id 与数据库 id 一致。"""
     created = updated = 0
@@ -75,8 +86,8 @@ async def seed_games(session: AsyncSession, catalog: list[dict]) -> int:
         game.max_players = to_int(c["max_players"])
         game.play_time_minutes = to_int(c["play_time_minutes"])
         game.min_age = to_int(c["min_age"])
-        game.categories = c["categories"]
-        game.mechanics = c["mechanics"]
+        game.categories = as_list(c["categories"])
+        game.mechanics = as_list(c["mechanics"])
         game.publisher = c["publisher"] or None
         game.year_published = to_int(c["year_published"])
     await session.commit()

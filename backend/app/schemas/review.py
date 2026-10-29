@@ -1,15 +1,26 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ReviewCreate(BaseModel):
+    """评分与评测共用同一张表，但两个入口各写各的字段：
+
+    - 「玩家评分」只传 rating；
+    - 「玩家评测」只传 content（可带图片）；
+    - 两者至少提供一项，避免写出一条空记录。
+    """
+
     game_id: int
-    rating: int = Field(ge=1, le=10)
-    # 正文可选：允许「只打分不写内容」的纯评分（右侧快捷评分入口）。
-    # 有正文的才算「评测」；纯评分只计入评分汇总，不进入评测列表 / 内容审核。
+    rating: int | None = Field(None, ge=1, le=10)
     content: str | None = Field(None, max_length=2000)
     images: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one(self):
+        if self.rating is None and not (self.content and self.content.strip()):
+            raise ValueError("评分与评测内容至少提供一项")
+        return self
 
 
 class ReviewOut(BaseModel):
@@ -18,7 +29,7 @@ class ReviewOut(BaseModel):
     id: int
     user_id: int
     game_id: int
-    rating: int
+    rating: int | None = None
     content: str | None = None
     like_count: int
     created_at: datetime

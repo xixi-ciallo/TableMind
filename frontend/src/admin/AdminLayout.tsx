@@ -7,9 +7,11 @@ import {
   BookOutlined,
   DashboardOutlined,
   DatabaseOutlined,
+  ExperimentOutlined,
   HomeOutlined,
   LogoutOutlined,
   MenuOutlined,
+  SettingOutlined,
   TagsOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
@@ -32,6 +34,8 @@ const NAV_ITEMS: NavItem[] = [
   { key: '/admin/tags', label: '标签管理', icon: <TagsOutlined /> },
   { key: '/admin/moderation', label: '内容审核', icon: <AuditOutlined /> },
   { key: '/admin/rule-docs', label: '规则文档', icon: <BookOutlined /> },
+  { key: '/admin/evals', label: '评测中心', icon: <ExperimentOutlined /> },
+  { key: '/admin/configs', label: '系统配置', icon: <SettingOutlined /> },
 ];
 
 /** antd Menu 需要的 items 结构，由上面的导航表派生，避免两处维护 */

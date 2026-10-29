@@ -52,7 +52,8 @@ type SiteReview = {
   id: number;
   user_id: number;
   game_id: number;
-  rating: number;
+  /** 评测与评分分离：只写评测正文时没有分数，因此可能为 null */
+  rating: number | null;
   content: string | null;
   like_count: number;
   created_at: string;
@@ -153,14 +154,13 @@ export default function GameDetailPage() {
   const [videosOpen, setVideosOpen] = useState(false);
   /** 「写下评测」弹窗 + 本站真实评测列表 */
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [reviewRating, setReviewRating] = useState<number>(8);
   const [reviewText, setReviewText] = useState('');
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   /** 评测图片（待发布，最多 9 张） */
   const [reviewFiles, setReviewFiles] = useState<File[]>([]);
   const [reviews, setReviews] = useState<SiteReview[]>([]);
-  /** 只有「写了文字内容」的才算评测；右侧直接打分（content 为空）不在这里重复展示 */
-  const writtenReviews = reviews.filter((r) => Boolean(r.content && r.content.trim()));
+  /** 只写了正文的评测（纯评分只在右侧评分区体现） */
+  const writtenReviews = reviews;
   /** 评测互动：展开的回复面板 / 已加载的评论 / 回复输入框 */
   const [replyOpenId, setReplyOpenId] = useState<number | null>(null);
   const [commentsMap, setCommentsMap] = useState<Record<number, ReviewComment[]>>({});
@@ -310,12 +310,14 @@ export default function GameDetailPage() {
     }
   };
 
-  /** 本站真实评测列表：随游戏切换重新拉取 */
+  /** 本站评测列表：只含写了正文的评测，纯评分不在此列 */
   useEffect(() => {
     if (!game) return;
     let alive = true;
     client
-      .get<SiteReview[]>('/reviews', { params: { game_id: game.id, limit: 50 } })
+      .get<SiteReview[]>('/reviews', {
+        params: { game_id: game.id, limit: 50 },
+      })
       .then(({ data }) => {
         if (alive && Array.isArray(data)) setReviews(data);
       })
@@ -371,7 +373,7 @@ export default function GameDetailPage() {
   );
   const shownVideos = sortedVideos.slice(0, VIDEO_PREVIEW);
 
-  /** 发表评测：评分 + 正文，写入本站真实评测表 */
+  /** 发表评测：只写正文（评分走右侧「玩家评分」） */
   const submitReview = async () => {
     if (!game) return;
     if (!isLoggedIn) {
@@ -379,14 +381,13 @@ export default function GameDetailPage() {
       return;
     }
     if (reviewText.trim().length < 5) {
-      message.warning('评测正文至少写 5 个字，不能只打分');
+      message.warning('评测正文至少写 5 个字');
       return;
     }
     setReviewSubmitting(true);
     try {
       const { data: created } = await client.post<SiteReview>('/reviews', {
         game_id: game.id,
-        rating: reviewRating,
         content: reviewText.trim(),
       });
       // 选了图片就单独上传到这条评测（后端限制累计 9 张）
@@ -404,12 +405,13 @@ export default function GameDetailPage() {
       setReviewText('');
       setReviewFiles([]);
       const [{ data: list }, { data: detail }] = await Promise.all([
-        client.get<SiteReview[]>('/reviews', { params: { game_id: game.id, limit: 50 } }),
+        client.get<SiteReview[]>('/reviews', {
+          params: { game_id: game.id, limit: 50 },
+        }),
         client.get(`/games/${game.id}`),
       ]);
       if (Array.isArray(list)) setReviews(list);
       setRating({ avg_rating: detail.avg_rating ?? 0, rating_count: detail.rating_count ?? 0 });
-      setMyRating(reviewRating);
     } catch {
       message.error('发布失败，请重试');
     } finally {
@@ -1357,13 +1359,22 @@ export default function GameDetailPage() {
       <SectionCard
         title="玩家评测"
         extra={
-          <span style={{ fontSize: 12, color: 'var(--tm-text-secondary)' }}>共 {writtenReviews.length} 条本站真实评测</span>
+          <span style={{ fontSize: 12, color: 'var(--tm-text-secondary)' }}>
+            {writtenReviews.length} 条文字评测
+            {rating && rating.rating_count > 0 ? ` · ${rating.rating_count} 人已评分` : ''}
+          </span>
         }
         style={{ marginBottom: 18 }}
       >
         {writtenReviews.length === 0 ? (
           <Empty
-            description={<span style={{ color: 'var(--tm-text-secondary)' }}>还没有评测，来做第一个</span>}
+            description={
+              <span style={{ color: 'var(--tm-text-secondary)' }}>
+                {rating && rating.rating_count > 0
+                  ? `已有 ${rating.rating_count} 位玩家打分，还没有人写文字评测`
+                  : '还没有评测，来做第一个'}
+              </span>
+            }
             style={{ padding: '20px 0' }}
           >
             <Button type="primary" onClick={() => (isLoggedIn ? setReviewOpen(true) : navigate('/login'))}>
@@ -1389,13 +1400,13 @@ export default function GameDetailPage() {
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
                   <span style={{ fontWeight: 700, fontSize: 14 }}>{r.username}</span>
-                  <Tag color="volcano">{r.rating} / 10</Tag>
+                  {r.rating != null && <Tag color="volcano">{r.rating} / 10</Tag>}
                   <span style={{ fontSize: 12, color: 'var(--tm-text-tertiary)' }}>
                     {new Date(r.created_at).toLocaleDateString('zh-CN')}
                   </span>
                 </div>
                 <div style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.8, whiteSpace: 'pre-wrap' }}>
-                  {r.content || '（这位玩家只打了分，没有写内容）'}
+                  {r.content}
                 </div>
 
                 {/* 评测图片：最多 9 张，点击放大 */}
@@ -1731,10 +1742,6 @@ export default function GameDetailPage() {
         }}
         onOk={submitReview}
       >
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 13, color: 'var(--tm-text-secondary)', marginBottom: 6 }}>你的评分（1-10）</div>
-          <Rate count={10} value={reviewRating} onChange={setReviewRating} />
-        </div>
         <Input.TextArea
           rows={5}
           value={reviewText}

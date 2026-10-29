@@ -39,6 +39,7 @@ logs/
 
 # ============ 数据库数据文件（便携 PG/Redis 不在版本库内）============
 pgdata/
+local-env/
 *.db
 *.sqlite
 *.sqlite3

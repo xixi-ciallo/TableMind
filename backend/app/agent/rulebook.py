@@ -40,15 +40,32 @@ PAGE_LINE_RE = re.compile(
 
 @dataclass
 class Chunk:
-    """一个语义切片。section_path 是该片所处的章节路径（用于拼接上下文头）。"""
+    """一个语义切片。section_path 是该片所处的章节路径（用于拼接上下文头）。
+
+    `parent_text` / `parent_key` 是**父子分块**信息：子片用于向量匹配（精确定位），
+    父片是它所属的完整语义章节（供模型阅读完整上下文）。同一章节被切成多片时，
+    这些子片的 parent_key 相同、parent_text 相同。
+    """
 
     section_path: list[str] = field(default_factory=list)
     text: str = ""
+    parent_text: str = ""
+    parent_key: int = -1
 
     @property
     def header(self) -> str:
         """拼成给模型看的上下文头，如「卡坦岛 > 回合流程 > 建造费用」"""
         return " > ".join(self.section_path)
+
+
+@dataclass
+class PreparedChunk:
+    """入库用切片：子片正文 + 父片归属（parent_index 为同一批次里的父片首片下标）。"""
+
+    text: str
+    parent_index: int
+    parent_text: str
+
 
 
 def _estimate_tokens(text: str) -> int:
@@ -196,12 +213,26 @@ def semantic_chunks(
     flush()
 
     out: list[Chunk] = []
-    for sec in sections:
+    for sec_idx, sec in enumerate(sections):
         if _estimate_tokens(sec.text) <= target_tokens:
-            out.append(sec)
+            out.append(
+                Chunk(
+                    section_path=list(sec.section_path),
+                    text=sec.text,
+                    parent_text=sec.text,
+                    parent_key=sec_idx,
+                )
+            )
             continue
         for piece in _split_oversized(sec.text, target_tokens, overlap):
-            out.append(Chunk(section_path=list(sec.section_path), text=piece))
+            out.append(
+                Chunk(
+                    section_path=list(sec.section_path),
+                    text=piece,
+                    parent_text=sec.text,
+                    parent_key=sec_idx,
+                )
+            )
 
     # 合并过短碎片：只允许合并**同一章节**内的碎片（即超长节切分产生的零头）。
     # 绝不能跨章节合并——那会把「组件清单」并进「边界情况」这类不相关章节，
@@ -211,7 +242,7 @@ def semantic_chunks(
         if (
             merged
             and _estimate_tokens(c.text) < MIN_CHUNK_TOKENS
-            and merged[-1].section_path == c.section_path
+            and merged[-1].parent_key == c.parent_key
         ):
             merged[-1].text = (merged[-1].text + "\n" + c.text).strip()
         else:
@@ -219,25 +250,37 @@ def semantic_chunks(
     return merged
 
 
-def chunk_rule_doc(md_text: str, target_tokens: int = TARGET_TOKENS) -> tuple[dict, list[str]]:
-    """规则文档 -> 可入库的切片文本列表。
+def chunk_rule_doc(
+    md_text: str, target_tokens: int = TARGET_TOKENS
+) -> tuple[dict, list[PreparedChunk]]:
+    """规则文档 -> 可入库的切片列表（子片正文 + 所属父章节）。
 
     返回 (frontmatter 元数据, 切片列表)。每片开头会带上
     「《游戏名》/ 章节路径」上下文头——这样 embedding 能感知语义归属，
-    检索命中后模型也能直接知道这段来自哪一节。
+    检索命中后模型也能直接知道这段来自哪一节。父片文本同样带上下文头，
+    检索命中子片后可直接回填父片给模型（父子分块），既保证匹配精度又保留完整上下文。
     """
     meta, body = parse_frontmatter(md_text)
     body = clean_text(body)
     chunks = semantic_chunks(body, target_tokens=target_tokens)
 
     title = (meta.get("title") or "").strip()
-    out: list[str] = []
-    for c in chunks:
+    out: list[PreparedChunk] = []
+    parent_index = 0
+    parent_key = -1
+    for i, c in enumerate(chunks):
         head_parts: list[str] = []
         if title:
             head_parts.append(f"《{title}》")
         if c.header:
             head_parts.append(c.header)
         head = " / ".join(head_parts)
-        out.append(f"【{head}】\n{c.text}" if head else c.text)
+        text = f"【{head}】\n{c.text}" if head else c.text
+        parent_body = c.parent_text or c.text
+        parent_text = f"【{head}】\n{parent_body}" if head else parent_body
+
+        if c.parent_key != parent_key:
+            parent_key = c.parent_key
+            parent_index = i
+        out.append(PreparedChunk(text=text, parent_index=parent_index, parent_text=parent_text))
     return meta, out

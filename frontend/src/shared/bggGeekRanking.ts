@@ -372,8 +372,8 @@ export const bggGeekRanking: BggGeekItem[] = [
     "avg_rating": 8.07,
     "num_voters": 46496,
     "thumb": "https://cf.geekdo-images.com/CzwSm8i7tkLz6cBnrILZBg__micro@2x/img/_EaM6Tvr7hSH-1r8r2OwN2brInE=/fit-in/128x128/filters:strip_icc()/pic3453267.jpg",
-    "name_zh": "康考迪亚",
-    "slug": "concordia"
+    "name_zh": null,
+    "slug": null
   },
   {
     "position": 30,
@@ -384,8 +384,8 @@ export const bggGeekRanking: BggGeekItem[] = [
     "avg_rating": 8.08,
     "num_voters": 59079,
     "thumb": "https://cf.geekdo-images.com/6GqH14TJJhza86BX5HCLEQ__micro@2x/img/woM8yIw0zXtm9eeEuQW4MEQM2pY=/fit-in/128x128/filters:strip_icc()/pic5674958.jpg",
-    "name_zh": null,
-    "slug": null
+    "name_zh": "阿纳克遗迹",
+    "slug": "lost-ruins-of-arnak"
   },
   {
     "position": 31,
@@ -720,8 +720,8 @@ export const bggGeekRanking: BggGeekItem[] = [
     "avg_rating": 7.9,
     "num_voters": 74831,
     "thumb": "https://cf.geekdo-images.com/QFiIRd2kimaMqTyWsX0aUg__micro@2x/img/dV1AYOJCWRCld7hVlYjdOI15nuM=/fit-in/128x128/filters:strip_icc()/pic158548.jpg",
-    "name_zh": null,
-    "slug": null
+    "name_zh": "波多黎各",
+    "slug": "puerto-rico"
   },
   {
     "position": 59,
@@ -816,8 +816,8 @@ export const bggGeekRanking: BggGeekItem[] = [
     "avg_rating": 7.85,
     "num_voters": 77360,
     "thumb": "https://cf.geekdo-images.com/3L6ZtOll9W5O6-3-EwSMyw__micro@2x/img/fVt9IffIxhGeCcm52hDctXQY7v0=/fit-in/128x128/filters:strip_icc()/pic1899157.jpg",
-    "name_zh": "农场主",
-    "slug": "agricola"
+    "name_zh": null,
+    "slug": null
   },
   {
     "position": 67,

@@ -3,7 +3,7 @@
 只依赖 httpx，不引入 SDK，方便换任意兼容端点。
 流式解析同时兼容「推理模型」与「普通对话模型」两类响应：
 推理模型（如 deepseek-v4.1-flash）先吐 `delta.reasoning_content`（思维链）、
-之后才是 `delta.content`（正式回答）；普通模型（当前使用的 qwen-flash）只吐 content。
+之后才是 `delta.content`（正式回答）；普通模型（当前使用的 qwen-plus）只吐 content。
 两种都处理，换模型时无需改解析逻辑。
 """
 from __future__ import annotations
@@ -39,7 +39,10 @@ def _get_embed_client():
             from openai import AsyncOpenAI
         except ImportError:
             return None
-        _embed_client = AsyncOpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL)
+        _embed_client = AsyncOpenAI(
+            api_key=settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY,
+            base_url=settings.DASHSCOPE_BASE_URL,
+        )
     return _embed_client
 
 # embedding 结果缓存：同一查询串重复计算代价高（每次 RAG 检索都算），进程内复用。
@@ -66,6 +69,20 @@ def available() -> bool:
 
 def model_name() -> str:
     return settings.LLM_MODEL
+
+
+def _model_chain(model: str | None = None) -> list[str]:
+    """主模型 + 备用模型：额度耗尽/被限流时按顺序自动切换，避免全站降级。"""
+    chain = [model or settings.LLM_MODEL]
+    for name in (settings.LLM_FALLBACK_MODELS or "").split(","):
+        name = name.strip()
+        if name and name not in chain:
+            chain.append(name)
+    return chain
+
+
+# 可切换的失败类型：这些错误换一个模型往往就能继续
+_FALLBACK_KINDS = {"quota", "model", "auth", "server"}
 
 
 def _headers() -> dict[str, str]:
@@ -114,6 +131,7 @@ def _payload(
     *,
     model: str | None = None,
     enable_thinking: bool = True,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     p: dict[str, Any] = {
         "model": model or settings.LLM_MODEL,
@@ -126,6 +144,8 @@ def _payload(
     # 规则问答/改写是知识检索型任务，不需要冗长思维链：关掉可大幅降低首字延迟
     if not enable_thinking:
         p["enable_thinking"] = False
+    if extra:
+        p.update(extra)
     return p
 
 
@@ -154,6 +174,33 @@ async def chat_complete(
         raise LLMError("unconfigured", "未配置大模型密钥")
 
     timeout = httpx.Timeout(settings.LLM_TIMEOUT, connect=15)
+    chain = _model_chain(model)
+    for idx, name in enumerate(chain):
+        try:
+            return await _chat_complete_once(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=name,
+                enable_thinking=enable_thinking,
+                timeout=timeout,
+            )
+        except LLMError as e:
+            if e.kind not in _FALLBACK_KINDS or idx == len(chain) - 1:
+                raise
+            log.warning("模型 %s 不可用（%s），切换到 %s", name, e.kind, chain[idx + 1])
+    raise LLMError("bad_request", "没有可用的大模型")
+
+
+async def _chat_complete_once(
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float,
+    max_tokens: int | None,
+    model: str,
+    enable_thinking: bool,
+    timeout: httpx.Timeout,
+) -> str:
     try:
         resp = await _get_client().post(
             _endpoint(), headers=_headers(),
@@ -197,13 +244,28 @@ async def chat_with_tools(
         raise LLMError("unconfigured", "未配置大模型密钥")
 
     payload = _payload(messages, temperature, max_tokens, False,
-                       model=model, enable_thinking=enable_thinking)
+                       enable_thinking=enable_thinking)
     payload["tools"] = tools
     payload["tool_choice"] = tool_choice
 
     timeout = httpx.Timeout(settings.LLM_TIMEOUT, connect=15)
+    chain = _model_chain(model)
+    for idx, name in enumerate(chain):
+        try:
+            return await _chat_tools_once(payload, model=name, timeout=timeout)
+        except LLMError as e:
+            if e.kind not in _FALLBACK_KINDS or idx == len(chain) - 1:
+                raise
+            log.warning("模型 %s 不可用（%s），切换到 %s", name, e.kind, chain[idx + 1])
+    raise LLMError("bad_request", "没有可用的大模型")
+
+
+async def _chat_tools_once(
+    payload: dict[str, Any], *, model: str, timeout: httpx.Timeout
+) -> dict[str, Any]:
+    body = {**payload, "model": model}
     try:
-        resp = await _get_client().post(_endpoint(), headers=_headers(), json=payload, timeout=timeout)
+        resp = await _get_client().post(_endpoint(), headers=_headers(), json=body, timeout=timeout)
     except httpx.TimeoutException:
         raise LLMError("timeout", "大模型响应超时")
     except httpx.HTTPError as e:
@@ -245,7 +307,7 @@ async def embed(text: str) -> list[float] | None:
     维度见 settings.EMBEDDING_MODEL，必须与数据库 Vector(N) 一致。
     未配置密钥 / 无 openai 包 / 调用失败均返回 None（由上层降级）。
     """
-    if not available():
+    if not (settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY):
         return None
     key = text[:8000]
     cached = _embed_cache.get(key)
@@ -278,33 +340,60 @@ async def chat_stream(
     max_tokens: int | None = None,
     model: str | None = None,
     enable_thinking: bool = True,
+    extra: dict[str, Any] | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
     """流式调用，逐段产出 (kind, text)。
 
     kind='reasoning' 是思维链（可用于「思考中」提示，不必展示给用户）；
     kind='content' 是正式回答正文。
+    extra 可追加协议字段，例如 {"enable_search": True} 开启联网检索。
     """
     if not available():
         raise LLMError("unconfigured", "未配置大模型密钥")
 
     timeout = httpx.Timeout(settings.LLM_TIMEOUT, connect=15)
-    client = _get_client()
-    stream_payload = _payload(
+    payload = _payload(
         messages, temperature, max_tokens, True,
-        model=model, enable_thinking=enable_thinking,
+        enable_thinking=enable_thinking, extra=extra,
     )
-    stream_payload["stream_options"] = {"include_usage": True}
+    payload["stream_options"] = {"include_usage": True}
+
+    # 已开始吐字后不再换模型：重试会让用户看到两段前缀不同的回答。
+    chain = _model_chain(model)
+    for idx, name in enumerate(chain):
+        emitted = False
+        try:
+            async for kind, text in _stream_once(
+                payload, model=name, timeout=timeout, client=_get_client()
+            ):
+                emitted = True
+                yield kind, text
+            return
+        except LLMError as e:
+            if emitted or e.kind not in _FALLBACK_KINDS or idx == len(chain) - 1:
+                raise
+            log.warning("模型 %s 不可用（%s），切换到 %s", name, e.kind, chain[idx + 1])
+
+
+async def _stream_once(
+    payload: dict[str, Any],
+    *,
+    model: str,
+    timeout: httpx.Timeout,
+    client,
+) -> AsyncIterator[tuple[str, str]]:
+    body = {**payload, "model": model}
     try:
         async with client.stream(
             "POST",
             _endpoint(),
             headers=_headers(),
-            json=stream_payload,
+            json=body,
             timeout=timeout,
         ) as resp:
             if resp.status_code != 200:
-                body = (await resp.aread()).decode("utf-8", "ignore")
-                raise _classify(resp.status_code, body)
+                raw_body = (await resp.aread()).decode("utf-8", "ignore")
+                raise _classify(resp.status_code, raw_body)
 
             async for line in resp.aiter_lines():
                 if not line:
@@ -312,13 +401,13 @@ async def chat_stream(
                 line = line.strip()
                 if not line.startswith("data:"):
                     continue
-                payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
-                    if payload == "[DONE]":
+                line_payload = line[5:].strip()
+                if not line_payload or line_payload == "[DONE]":
+                    if line_payload == "[DONE]":
                         break
                     continue
                 try:
-                    chunk = json.loads(payload)
+                    chunk = json.loads(line_payload)
                 except ValueError:
                     continue
 

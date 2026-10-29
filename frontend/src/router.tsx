@@ -26,6 +26,8 @@ const RuleDocsPage = lazy(() => import('./admin/pages/RuleDocsPage'));
 const UserManagePage = lazy(() => import('./admin/pages/UserManagePage'));
 const ModerationPage = lazy(() => import('./admin/pages/ModerationPage'));
 const TagManagePage = lazy(() => import('./admin/pages/TagManagePage'));
+const EvalPage = lazy(() => import('./admin/pages/EvalPage'));
+const ConfigPage = lazy(() => import('./admin/pages/ConfigPage'));
 
 /** 页面加载占位：与最终版式接近的骨架屏，避免切换时白屏跳动 */
 function PageSkeleton() {
@@ -102,6 +104,8 @@ export const router = createBrowserRouter([
       { path: 'users', element: withSuspense(<UserManagePage />) },
       { path: 'moderation', element: withSuspense(<ModerationPage />) },
       { path: 'tags', element: withSuspense(<TagManagePage />) },
+      { path: 'evals', element: withSuspense(<EvalPage />) },
+      { path: 'configs', element: withSuspense(<ConfigPage />) },
     ],
   },
 ]);
