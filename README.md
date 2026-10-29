@@ -10,6 +10,7 @@ TableMind 是一个一体化 Web 平台，覆盖**用户端**与**管理员端**
 
 - **桌游信息库**：47 款桌游的结构化数据（类型、机制、人数、时长、难度等），支持多维筛选与检索；封面等静态资源随库提供。
 - **评分评测与社区**：用户收藏（想玩 / 玩过 / 拥有）、评分评测、社区发帖与评论。
+- **榜单**：BGG 极客榜只展示本站已收录、可跳转详情页的作品；本站评分榜按玩家评分取前 20 名。
 - **规则书 RAG 智能问答**：说明书中文化清洗 → 切分 → 向量化入库；答案附带规则书引用来源，模型降级时仍返回规则原文、**永不空答**。规则语料不随仓库分发，需登录管理端上传。
 - **Agent 对话式推荐**：三级路由（关键词优先 → 追问沿用历史 → LLM 兜底）+ 规则问答 / 个性化推荐双流水线；分层记忆（短期会话 + 长期用户画像）支撑多轮上下文；人数区间、时长上下限等槽位化筛选与流式输出。
 - **管理端**：桌游维护、标签管理、用户管理、内容审核、规则文档管理，基于 ECharts 的数据看板（核心指标卡片 + 近 30 天趋势），以及 **RAG 四维评测中心**（用例库 + 批量跑批 + LLM 裁判 + badcase 定位）与 **系统配置中心**（在线调参、即时生效、变更审计与回滚）。
@@ -22,10 +23,10 @@ TableMind 是一个一体化 Web 平台，覆盖**用户端**与**管理员端**
 | 层 | 技术 |
 |----|------|
 | 后端 | Python · FastAPI · SQLAlchemy 2.0（全异步 asyncpg）· Alembic |
-| 数据库 / 缓存 | PostgreSQL + **pgvector** 向量扩展 · Redis |
+| 数据库 / 缓存 | PostgreSQL + **pgvector**（HNSW 向量索引）· Redis（预留，当前代码未使用） |
 | 鉴权 | JWT 无状态（用户名 / 手机号双通道登录，USER / ADMIN 角色隔离） |
-| AI / 大模型 | 百炼 DashScope（OpenAI 兼容端点）· `text-embedding-v1`（1536 维）· LangChain · RAG · Agent |
-| 检索 | 查询改写 + 向量 + **BM25（jieba / 二元组）** 混合检索，可切换 RRF / 归一化加权融合，**gte-rerank-v2** 精排，**父子分块回填**；支持 HyDE；hit@5 ≈ 96% |
+| AI / 大模型 | 百炼 DashScope OpenAI 兼容端点（模型可切换，默认 `deepseek-flash`，备用 `deepseek-v4-pro`）· `text-embedding-v1`（1536 维）· LangChain / LangGraph |
+| 检索 | pgvector **HNSW 近似检索** + BM25（jieba / 二元组）混合，可切换 RRF / 归一化加权融合，**gte-rerank-v2** 精排，**父子分块回填**；支持 HyDE；hit@5 ≈ 96% |
 | 评测 | LLM-as-judge 四维评分（Context Recall / Precision、Faithfulness、Answer Relevance），用例库快照 + 批次回归 + 通过率门禁 |
 | 前端 | React 18 · TypeScript · Ant Design · Vite · ECharts |
 
@@ -36,13 +37,14 @@ TableMind 是一个一体化 Web 平台，覆盖**用户端**与**管理员端**
 ```
 TableMind/
 ├── backend/                 # FastAPI 后端
-│   ├── alembic/             # 数据库迁移
+│   ├── alembic/             # 数据库迁移（19 个版本，head = l7a8b9c0d1e2）
 │   ├── data/                # 桌游目录 / 规则书等种子数据
-│   ├── seed_*.py            # 初始化脚本（管理员 / 桌游 / 社区 / 资讯）
+│   ├── seed_*.py            # 初始化脚本（管理员 / 桌游 / 社区 / 评分 / 规则语料）
+│   ├── run.py               # Windows 友好启动入口（SelectorEventLoop + 根目录 .env）
 │   └── app/
 │       ├── api/             # 路由（user / admin）
-│       ├── agent/           # AI 管线（rag / router / loop / recommend / memory / llm / pool ...）
-│       ├── core/            # 配置 / 安全 / 数据库 / 依赖
+│       ├── agent/           # AI 管线（rag / agentic_rag / orchestrator / eval_* / memory / llm ...）
+│       ├── core/            # 配置 / 安全 / 数据库 / 运行时配置
 │       └── models/          # ORM 模型
 ├── frontend/                # React + Vite 前端
 │   ├── src/
@@ -88,8 +90,15 @@ cp .env.example .env
 
 ```bash
 cd backend
-pip install -r requirements.txt        # 或所用依赖管理
+pip install -r requirements.txt
 alembic upgrade head                   # 建表（迁移会自动 CREATE EXTENSION vector）
+
+# Windows 推荐：必须从项目根目录执行，自动处理 Windows 事件循环与根目录 .env
+cd ..
+python backend\run.py
+
+# 或 Linux / macOS
+cd backend
 PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -109,7 +118,26 @@ python seed_rulebooks.py               # 规则语料：扫描页 OCR + 切片 +
 
 > **规则问答语料**（切片文本与向量）不随仓库分发，但规则书扫描页已随仓库放在 `frontend/public/rules/`：运行 `python seed_rulebooks.py` 会逐页 OCR → 切片 → 向量化重建（OCR 结果缓存在 `logs/rule_ocr/`，中断可续跑）。也可以在管理端上传 PDF/图片后点「从规则书生成」。
 
-### 5. 前端
+### 5. 数据库脚本一览
+
+仓库**没有独立的 `.sql` 建库脚本**，库结构与初始数据全部由脚本管理：
+
+| 类型 | 位置 / 命令 | 说明 |
+|------|-------------|------|
+| 结构迁移 | `backend/alembic/versions/`（`alembic upgrade head`） | 19 个 Alembic 迁移，单 head `l7a8b9c0d1e2`；覆盖 pgvector 扩展、父子分块、HNSW 索引、评测表、配置表等，**不要手写建表 SQL** |
+| 管理员账号 | `seed_admin.py` | 创建 admin，幂等 |
+| 桌游目录 | `seed_catalog.py` | 从 `data/catalog.json` 导入 47 款，幂等 |
+| 社区数据 | `seed_community_refresh.py` | 玩家账号 + 帖子 + 评论，执行前**清空社区表** |
+| 评分数据 | `seed_reviews.py` | 依赖上一步生成的玩家账号 |
+| 官方资讯 | `seed_official_news.py` | 官方资讯帖 |
+| 规则语料 | `seed_rulebooks.py` | 逐页 OCR → 切片 → 向量化，耗时较长 |
+| 早期社区 | `seed_community.py` | 与 `seed_community_refresh.py` 二选一；后者会整体重灌 |
+
+- 查看迁移状态：`cd backend && alembic current` / `alembic heads`
+- 迁移读取根目录 `.env` 的 `DATABASE_URL`，执行目录为 `backend/`
+- `local-env/pgdata` 丢失后，重新执行 `alembic upgrade head` + 上述种子脚本即可恢复结构、桌游、账号、社区与评分；历史会话与评测用例无备份
+
+### 6. 前端
 
 ```bash
 cd frontend
