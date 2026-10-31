@@ -318,7 +318,13 @@ async def retrieve_rule_chunks(db: AsyncSession, game_id: int, query: str, k: in
 
 
 async def retrieve_rule_chunk_hits(
-    db: AsyncSession, game_id: int, query: str, k: int = 5, expand: int = 0
+    db: AsyncSession,
+    game_id: int,
+    query: str,
+    k: int = 5,
+    expand: int = 0,
+    history: list[tuple[str, str]] | None = None,
+    game_name: str | None = None,
 ) -> list[tuple[int, str]]:
     """同 retrieve_rule_chunks，但返回 (chunk_index, 原文)，并可选带回相邻切片。
 
@@ -370,10 +376,23 @@ async def retrieve_rule_chunk_hits(
     idx = [int(r.chunk_index) for r in rows]
     row_pos = {int(r.id): i for i, r in enumerate(rows)}
 
+    # 同父分组索引（窗口细裁用）：组键 = (rule_book_id, parent_index)，
+    # 组内顺序即文档顺序（rows 按 chunk_index 排序）。退化/历史数据的 parent_index
+    # 为 NULL，不进组——这些切片本来就没有相邻关系，窗口化自然回落到命中片自身。
+    group_members: dict[tuple[int, int], list[int]] = {}
+    group_pos: dict[int, int] = {}
+    for pos, r in enumerate(rows):
+        if r.parent_index is not None:
+            key = (int(r.rule_book_id or 0), int(r.parent_index))
+            group_members.setdefault(key, []).append(pos)
+            group_pos[pos] = len(group_members[key]) - 1
+
     # ---- 查询增强：查询改写（口语 → 规则书措辞）与 HyDE（假设答案）并行 ----
     # 两个调用互相独立，并行可把这段额外延迟压到约等于单次调用；各自内部已做开关判断与失败兜底。
+    # 改写带近几轮历史时顺带完成指代消解（同一次调用，零额外延迟）。
     expansions, hyde_doc = await asyncio.gather(
-        _expand_queries(query), _hyde_document(query)
+        _expand_queries(query, history=history, game_name=game_name),
+        _hyde_document(query),
     )
     variants = [query] + expansions
 
@@ -412,6 +431,7 @@ async def retrieve_rule_chunk_hits(
             order = _rank_desc(bm_scores)
     else:
         order = _hybrid_order(vec_scores, bm_scores, boost)
+        order = _filter_by_vec_sim(order, vec_scores)
 
     # ---- Rerank 阶段：融合后再精细排序，纠正难例 ----
     # 仅对前 RERANK_TOP_N 个候选打分重排，其余保持原序追加在后；任何异常回落融合顺序。
@@ -422,7 +442,8 @@ async def retrieve_rule_chunk_hits(
             head_n = min(settings.RERANK_TOP_N, len(order))
             cands = [(order[i], docs[order[i]]) for i in range(head_n)]
             cand_scores = None
-            if vec_scores is not None and (settings.RERANK_METHOD or "").lower() == "score":
+            if vec_scores is not None:
+                # 融合分始终随候选传入：gte 403 熔断/失败时零成本回落「融合分重排」
                 fused = _fused_scores(vec_scores, bm_scores, boost)
                 cand_scores = [fused[order[i]] for i in range(head_n)]
             reranked = await _rerank.rerank_rule_chunks(
@@ -471,9 +492,50 @@ async def retrieve_rule_chunk_hits(
     for i in picked:
         r = rows[i]
         parent = (r.parent_text or "").strip() if settings.PARENT_FILL_ENABLED else ""
-        text = _clip_parent(parent, docs[i], settings.PARENT_MAX_CHARS) if parent else docs[i]
+        if not parent:
+            text = docs[i]
+        elif settings.PARENT_WINDOW < 0:
+            # 细裁关闭：维持整父块回填的旧行为（回滚通道）
+            text = _clip_parent(parent, docs[i], settings.PARENT_MAX_CHARS)
+        else:
+            text = _parent_window_text(rows, docs, i, group_members, group_pos)
         out.append((idx[i], text))
     return out
+
+
+def _parent_window_text(
+    rows: list,
+    docs: list[str],
+    hit_pos: int,
+    group_members: dict[tuple[int, int], list[int]],
+    group_pos: dict[int, int],
+) -> str:
+    """父块窗口细裁：以命中子片为中心，回填同一父章节内的相邻窗口而非整段父章节。
+
+    整段回填的问题：父章节中位 1679 字而命中子片中位仅 556 字，约 2/3 的 token 是
+    同章节无关内容，稀释上下文精确度（评测 cp 0.66 的主因）。窗口化后：
+    - PARENT_WINDOW=0 → 只回填命中片（密度最高，规则书子片本身按语义切分、一般自含完整规则）
+    - PARENT_WINDOW=1 → 前后各带一片，保半截句接续
+    - 窗口超限时复用 _clip_parent 围绕命中片收缩（保底不丢答案段）
+    - 组内无相邻片 / 无分组信息时回落命中片自身，绝不空答
+    """
+    r = rows[hit_pos]
+    if r.parent_index is None:
+        return docs[hit_pos]
+    members = group_members.get((int(r.rule_book_id or 0), int(r.parent_index)))
+    p = group_pos.get(hit_pos)
+    if not members or p is None:
+        return docs[hit_pos]
+    w = max(0, int(settings.PARENT_WINDOW))
+    lo = max(0, p - w)
+    hi = min(len(members), p + w + 1)
+    window = "\n".join(docs[m].strip() for m in members[lo:hi] if docs[m].strip())
+    if not window:
+        return docs[hit_pos]
+    max_chars = int(settings.PARENT_WINDOW_MAX_CHARS)
+    if max_chars > 0 and len(window) > max_chars:
+        window = _clip_parent(window, docs[hit_pos], max_chars)
+    return window
 
 
 # ---- 混合检索的内部实现 ----
@@ -495,24 +557,70 @@ _EXPAND_PROMPT = """把玩家对桌游规则的口语化提问，改写成 {n} �
 2. 把口语词换成规则书常用词（例：硬币→钱币、砖→磁砖、暖到什么程度→温度达到多少、开局→游戏准备、攒几分→获得多少胜利点）。
 3. 每行一条，不要编号、不要解释、不要 Markdown。"""
 
+# 多轮版：指代消解 + 改写合并成同一次调用（该调用已在检索关键路径上，零额外延迟）。
+_EXPAND_HISTORY_PROMPT = """下面是玩家与助手的最近对话，以及玩家的当前问题。当前问题里可能带有指代（如「它」「这个游戏」「那它呢」）或省略（如「那攻击呢」）。
+
+先把当前问题补全成一个**独立、完整**的问题（代词替换成对话里的具体对象，省略的部分补上），再把补全后的问句改写成 {n} 条「规则书里可能出现的措辞」的等价问句。
+
+要求：
+1. 补全只使用对话里明确提到的信息，不引入对话外的新设定，不改原意，不增删条件。
+2. 把口语词换成规则书常用词（例：硬币→钱币、砖→磁砖、开局→游戏准备、攒几分→获得多少胜利点）。
+3. 每一条输出都必须是完整问句（脱离上下文也能看懂）。
+4. 每行一条，不要编号、不要解释、不要 Markdown。
+
+最近对话：
+{history_block}
+
+当前问题：{query}"""
+
+_EXPAND_HISTORY_TURNS = 3   # 参与指代消解的最近轮数（一轮 = 用户 + 助手各一条）
+_EXPAND_HIST_MSG_CHARS = 200  # 每条历史消息的截断长度，防止长回答撑爆改写调用
+
 _expand_cache: dict[str, list[str]] = {}
 _EXPAND_CACHE_MAX = 500
 
 
-async def _expand_queries(query: str) -> list[str]:
-    """把口语化提问改写成若干规则书措辞的等价查询。
+async def _expand_queries(
+    query: str,
+    history: list[tuple[str, str]] | None = None,
+    game_name: str | None = None,
+) -> list[str]:
+    """把口语化提问改写成若干规则书措辞的等价查询；多轮时顺带完成指代消解。
 
     为什么需要：实测「开局手上该有几块硬币？」检索不到写着「每位玩家从银行中拿取7元钱币」
     的切片——用户用词（硬币/开局）与规则书用词（钱币/游戏准备）不一致，向量和 BM25 都漏。
     多查询扩展后取每条切片的**最高分**，等价于「任意一种说法命中就算命中」。
 
-    失败安全：任何异常都返回空列表，检索只用原查询，绝不影响主流程。
+    多轮语境（history 非空）：把「近 3 轮历史 + 当前问题」一起喂给改写调用，先补全指代
+    （「那它呢」→「那《X》的攻击阶段呢」）再做同义改写。**合并进这一次调用**而不是
+    单独发一次消解请求——该调用已在检索关键路径上，零额外延迟。
+
+    失败安全：任何异常都返回空列表，检索只用原查询；多轮时的实体注入（dialogue_state）
+    仍由 rule_qa 在上游完成，链路不空。
     """
     if not settings.RAG_QUERY_EXPAND_ENABLED or not llm.available():
         return []
-    cached = _expand_cache.get(query)
+
+    # 多轮语境：取最近 N 轮（一轮 = 用户 + 助手），拼成给模型看的对话块。
+    # 只保留有内容的消息；每条截断，防止长回答撑爆改写调用的预算。
+    hist = [
+        (str(role), str(content or "").strip()[:_EXPAND_HIST_MSG_CHARS])
+        for role, content in (history or [])
+        if (content or "").strip()
+    ][-_EXPAND_HISTORY_TURNS * 2 :]
+    if game_name and game_name not in query:
+        hist.insert(0, ("system", f"（当前讨论的游戏：《{game_name}》）"))
+
+    # 改写结果与「问题 + 语境」都相关：单轮走原缓存；多轮结果依赖历史，跳过缓存
+    cached = _expand_cache.get(query) if not hist else None
     if cached is not None:
         return cached
+
+    if hist:
+        history_block = "\n".join(
+            f"{'用户' if role in ('user', 'human', '用户') else '助手'}：{content}"
+            for role, content in hist
+        )
 
     # 失败不缓存：一次限流/网络抖动不应让该查询在进程生命周期内永远失去改写。
     # 加一次短重试，抗住连续调用后的瞬时 429。
@@ -521,7 +629,16 @@ async def _expand_queries(query: str) -> list[str]:
         try:
             raw = await llm.chat_complete(
                 [
-                    {"role": "system", "content": _EXPAND_PROMPT.format(n=QUERY_EXPAND_N)},
+                    {
+                        "role": "system",
+                        "content": (
+                            _EXPAND_HISTORY_PROMPT.format(
+                                n=QUERY_EXPAND_N, history_block=history_block, query=query
+                            )
+                            if hist
+                            else _EXPAND_PROMPT.format(n=QUERY_EXPAND_N)
+                        ),
+                    },
                     {"role": "user", "content": query},
                 ],
                 temperature=QUERY_EXPAND_TEMPERATURE,
@@ -547,9 +664,10 @@ async def _expand_queries(query: str) -> list[str]:
 
     if not out:
         return []  # 空结果同样不缓存，下次请求重试
-    if len(_expand_cache) >= _EXPAND_CACHE_MAX:
-        _expand_cache.clear()
-    _expand_cache[query] = out
+    if not hist:  # 多轮结果依赖语境，不缓存
+        if len(_expand_cache) >= _EXPAND_CACHE_MAX:
+            _expand_cache.clear()
+        _expand_cache[query] = out
     return out
 
 
@@ -806,6 +924,25 @@ def _hybrid_order(
     需要按「只看名次」融合时把 RAG_FUSION 设为 "rrf" 即可，两条路共用同一套权重。
     """
     return _rank_desc(_fused_scores(vec_scores, bm_scores, boost))
+
+
+def _filter_by_vec_sim(order: list[int], vec_scores: list[float] | None) -> list[int]:
+    """按量纲阈值过滤低相似候选（VEC_MIN_SIM，0=关闭）。
+
+    - 只在 score 融合模式生效：RRF 的输出是名次，无量纲，阈值没有意义（与参考实现一致）；
+    - 相似度为 0 的候选是「无向量证据」（向量池未覆盖/无向量），仍可由 BM25 召回，不参与过滤；
+    - 全部被滤掉时保底返回原序（调用方截 Top-K），保证「永不空答」不触发检索空 → fallback 放大。
+    """
+    thr = float(settings.VEC_MIN_SIM or 0.0)
+    if thr <= 0 or (settings.RAG_FUSION or "score").strip().lower() == "rrf":
+        return order
+    if not order or vec_scores is None or len(vec_scores) <= max(order, default=0):
+        return order
+    kept = [i for i in order if vec_scores[i] == 0.0 or vec_scores[i] >= thr]
+    if len(kept) == len(order):
+        return order
+    log.debug("VEC_MIN_SIM=%s 过滤：候选 %s -> %s 条", thr, len(order), len(kept))
+    return kept or order
 
 
 def _keywords(text: str) -> list[str]:

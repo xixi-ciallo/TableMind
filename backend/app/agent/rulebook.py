@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 TARGET_TOKENS = 512
 OVERLAP_RATIO = 0.12
 MIN_CHUNK_TOKENS = 24  # 过短的碎片（如只有一句标题）并入上一片，避免噪声片
+# 父块退化判据：正常章节上限约 512 tokens ≈ 1.5k 字，父块超过该长度且被多片共享，
+# 必是「整篇文档当父块」的退化形态（无 Markdown 标题的 OCR 稿会退化成单一章节）。
+PARENT_DEGENERATE_MAX_CHARS = 4000
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*$")
 FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
@@ -283,4 +286,18 @@ def chunk_rule_doc(
             parent_key = c.parent_key
             parent_index = i
         out.append(PreparedChunk(text=text, parent_index=parent_index, parent_text=parent_text))
-    return meta, out
+
+    # 导入侧校验：拦截父块退化。整篇文档当成一个父块入库时，检索端的父块去重会把
+    # Top-K 坍缩成 1 段，_clip_parent 在超长父块里定位窗口也常错位——宁可不要父块。
+    # 退化组的 parent_text 置空、parent_index 指向自身，检索端自动回落子片正文
+    # （rag.py 的父子回填已实现「无父片 → 用子片」路径）。
+    group_sizes: dict[int, int] = {}
+    for c in chunks:
+        group_sizes[c.parent_key] = group_sizes.get(c.parent_key, 0) + 1
+    fixed: list[PreparedChunk] = []
+    for i, p in enumerate(out):
+        if group_sizes[chunks[i].parent_key] >= 2 and len(p.parent_text) > PARENT_DEGENERATE_MAX_CHARS:
+            fixed.append(PreparedChunk(text=p.text, parent_index=i, parent_text=""))
+        else:
+            fixed.append(p)
+    return meta, fixed

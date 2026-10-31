@@ -61,7 +61,11 @@ def config_snapshot(case_ids: list[int] | None, game_id: int | None) -> dict:
         "hyde": settings.HYDE_ENABLED,
         "rerank_enabled": settings.RERANK_ENABLED,
         "rerank_method": settings.RERANK_METHOD,
+        "rerank_min_score": settings.RERANK_MIN_SCORE,
+        "vec_min_sim": settings.VEC_MIN_SIM,
         "parent_fill": settings.PARENT_FILL_ENABLED,
+        "parent_window": settings.PARENT_WINDOW,
+        "parent_window_max_chars": settings.PARENT_WINDOW_MAX_CHARS,
         "top_k": rule_qa.TOP_K,
     }
 

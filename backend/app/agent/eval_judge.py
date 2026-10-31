@@ -30,6 +30,10 @@ _JUDGE_PROMPT = """你是 RAG 系统的评测裁判。下面给出【问题】�
   这属于与资料矛盾，faithfulness 记 1~2 分。
 - answer_relevance：回答是否直接回应了问题（不跑题、不空泛）。5=完全切题；1=答非所问。
   拒答、只给免责声明而没有回答问题的，记 1~2 分。
+- 未收录类回答的例外：若回答声明「本站未收录 / 暂无该信息」，先核对参考资料是否确实没有该信息。
+  确实没有，这属于诚实拒答而非空答：faithfulness 记 5 分，answer_relevance 按声明是否直接
+  回应问题记 4~5 分，不适用上一条「拒答记 1~2 分」；若参考资料里其实写有该信息，才按上一条记 1~2 分。
+  参考答案若写明「应说明未收录 / 不得编造」，按回答是否如实声明且未编造打分：如实声明记 4~5，编造记 1。
 
 只输出一个 JSON 对象，不要 Markdown、不要解释、不要多余文字。reason 控制在 60 字以内。格式：
 {{
@@ -184,20 +188,29 @@ async def judge_case(
         contexts=_format_contexts(contexts),
         answer=(answer or "").strip()[:_MAX_ANSWER_CHARS] or "（空回答）",
     )
-    try:
-        raw = await llm.chat_complete(
-            [
-                {"role": "system", "content": "你是严谨的 RAG 评测裁判，只输出 JSON。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=settings.EVAL_JUDGE_TEMPERATURE,
-            max_tokens=settings.EVAL_JUDGE_MAX_TOKENS,
-            model=settings.EVAL_JUDGE_MODEL or settings.LLM_MODEL,
-            enable_thinking=False,
-        )
-    except Exception as e:  # noqa: BLE001
-        return JudgeResult(error=f"裁判调用失败：{e}")
-    return parse_judge(raw, has_ref)
+    # 裁判偶发输出截断 / JSON 不完整 / 网络抖动：重试 1 次。parse 失败时不会给出
+    # 任何分数（见 parse_judge），重试不会造成「半截分数」混进均值。
+    last_error: str | None = None
+    for _ in range(2):
+        try:
+            raw = await llm.chat_complete(
+                [
+                    {"role": "system", "content": "你是严谨的 RAG 评测裁判，只输出 JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=settings.EVAL_JUDGE_TEMPERATURE,
+                max_tokens=settings.EVAL_JUDGE_MAX_TOKENS,
+                model=settings.EVAL_JUDGE_MODEL or settings.LLM_MODEL,
+                enable_thinking=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            last_error = f"裁判调用失败：{e}"
+            continue
+        res = parse_judge(raw, has_ref)
+        if not res.error:
+            return res
+        last_error = res.error
+    return JudgeResult(error=last_error)
 
 
 if __name__ == "__main__":

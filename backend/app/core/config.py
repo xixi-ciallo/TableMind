@@ -117,10 +117,28 @@ class Settings(BaseSettings):
         "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
     )
     RERANK_TIMEOUT: int = 20
+    # 按量纲阈值过滤：低于阈值的候选不进上下文。
+    # VEC_MIN_SIM 作用于向量余弦相似度（0~1，仅 score 融合模式；RRF 名次无量纲不生效）；
+    # RERANK_MIN_SCORE 作用于 gte 重排相关分（0~1）。全部被滤掉时保底保留 Top-K，绝不空答。
+    # VEC_MIN_SIM=0.30 由评测中心扫参选定（0.25/0.30/0.35/0.40 四档 Context Recall 均 1.0，
+    # 0.30 与 0.40 并列最优 cp；0.30 过滤更保守）。RERANK_MIN_SCORE 暂保持 0：gte 403 期间
+    # 无真实相关分，待额度恢复后扫参再定。
+    VEC_MIN_SIM: float = 0.30
+    RERANK_MIN_SCORE: float = 0.0
     # 父子分块回填：子片负责匹配，命中后用所属父章节（更完整的上下文）交给模型。
     # 历史切片没有父片信息时自动回落到子片正文，不影响可用性。
     PARENT_FILL_ENABLED: bool = True
     PARENT_MAX_CHARS: int = 1600
+    # 父块窗口细裁：命中子片后不再整段回填父章节，而是回填「同一父章节内、以命中子片
+    # 为中心的相邻窗口」。实测（run12/13，2026-10-31）两档均无收益：
+    # - w=0 只回填命中片：cp 0.66→0.60 且 cr 1.0→0.94——规则跨块时（如璀璨宝石「获得
+    #   方式」与「分值」分居两片）关键内容被裁掉，faithfulness 连锁下滑；
+    # - w=1 前后各一片：cr 恢复 1.0，但窗口≈3 片≈父块中位体积，cp 仍 0.60 无提升。
+    # 结论：cp 0.6 是「5 段规则书原文拼接 × 裁判口径」的系统性天花板（cr/fa 已满，
+    # 答案质量达标），而非父块窗口构成问题——默认 -1 关闭，能力保留在管理端 REGISTRY，
+    # 语料或题库结构变化后可再扫参。
+    PARENT_WINDOW: int = -1
+    PARENT_WINDOW_MAX_CHARS: int = 1200
     # ---- P3：四维评测（LLM-as-judge）----
     # 裁判模型留空则跟随 LLM_MODEL；评测是离线的，模型可比线上更强/更便宜。
     EVAL_JUDGE_MODEL: str = ""

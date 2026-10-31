@@ -137,7 +137,10 @@ async def retrieve_layered_with_citations(
 
     # L2：规则说明书原文（权威）
     if game is not None:
-        hits = await rag.retrieve_rule_chunk_hits(db, game.id, q, k=TOP_K)
+        # history 透传进查询改写：多轮时在同一次改写调用里完成指代消解（零额外延迟）
+        hits = await rag.retrieve_rule_chunk_hits(
+            db, game.id, q, k=TOP_K, history=history, game_name=game.name
+        )
         chunks = [text for _idx, text in hits if (text or "").strip()]
         if chunks:
             # 不编号：模型会照着编号引用「片段N」，把内部检索细节漏给用户

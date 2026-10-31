@@ -23,9 +23,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Sequence
 
 import httpx
+from langchain_core.documents import BaseDocumentCompressor, Document
 
 from app.agent import llm
 from app.core.config import settings
@@ -119,15 +121,18 @@ def _gte_order(scores: list[float | None]) -> list[int]:
     )
 
 
-async def _gte_rerank(
+async def _gte_scores(
     query: str, candidates: list[tuple[int, str]]
-) -> list[tuple[int, str]] | None:
-    """调用百炼 gte-rerank-v2 给候选打相关性分并重排；失败返回 None 由调用方回落。
+) -> list[float | None] | None:
+    """调用百炼 gte-rerank-v2，返回与 candidates 对齐的相关分列表；失败返回 None。
 
     请求体（DashScope 原生协议，非 OpenAI 兼容）：
     {"model","input":{"query","documents"},"parameters":{"return_documents":false,"top_n"}}
     返回：output.results = [{"index": 原下标, "relevance_score": 0~1}]。
     """
+    global _gte_blocked_until
+    if time.monotonic() < _gte_blocked_until:
+        return None  # 熔断期内：不再白付 HTTP 往返，直接走零成本回落
     if not (settings.DASHSCOPE_API_KEY or settings.LLM_API_KEY) or not settings.RERANK_BASE_URL.strip():
         return None
     docs = [(text or "").strip() for _idx, text in candidates]
@@ -152,9 +157,18 @@ async def _gte_rerank(
         log.warning("Rerank(gte) 网络异常，回落融合顺序：%s", e)
         return None
     if resp.status_code != 200:
-        log.warning(
-            "Rerank(gte) HTTP %s，回落融合顺序：%s", resp.status_code, resp.text[:200]
-        )
+        if resp.status_code == 403:
+            # 403 = 免费额度耗尽，是持续状态而非瞬时故障：熔断一段时间，期间
+            # 每次检索直接零成本回落「融合分重排」，不再白付一次失败往返。
+            _gte_blocked_until = time.monotonic() + _GTE_BREAK_SECS
+            log.warning(
+                "Rerank(gte) HTTP 403（免费额度耗尽），熔断 %s 分钟内自动回落 score 重排",
+                _GTE_BREAK_SECS / 60,
+            )
+        else:
+            log.warning(
+                "Rerank(gte) HTTP %s，回落融合顺序：%s", resp.status_code, resp.text[:200]
+            )
         return None
     try:
         results = (resp.json().get("output") or {}).get("results") or []
@@ -168,7 +182,73 @@ async def _gte_rerank(
         return None
     if all(s is None for s in scores):
         return None
-    return [candidates[i] for i in _gte_order(scores)]
+    return scores
+
+
+# gte 403 熔断时长：额度充值 / 关闭「仅免费额度」后，最多等这么久自动恢复探测。
+_GTE_BREAK_SECS = 1800.0
+_gte_blocked_until = 0.0  # time.monotonic() 时间戳；0 = 未熔断
+
+
+class GteRerankCompressor(BaseDocumentCompressor):
+    """自写 LangChain 重排组件：百炼 gte-rerank-v2 交叉编码器重排。
+
+    与 LangChain 标准检索管线的 DocumentCompressor 形态对齐（langchain_core.documents），
+    内部复用本模块的 httpx 异步调用与 403 熔断逻辑，行为约定：
+    - 按相关分降序重排，相关分写进 metadata["rerank_score"]（供下游阈值过滤 / 观测）；
+    - RERANK_MIN_SCORE > 0 时丢弃低相关切片；全部低于阈值时保底原样返回，绝不空手；
+    - gte 不可用（网络异常 / 403 熔断 / 结构异常）时原样返回输入，由调用方零成本回落
+      「融合分重排」——最坏情况只是「没重排」，绝不影响回答正确性。
+    检索管线为异步链路，只实现 acompress_documents；如需同步用法请自行 asyncio.run。
+    """
+
+    top_n: int = 15
+
+    def compress_documents(self, documents, query, callbacks=None, **kwargs):
+        raise NotImplementedError("检索管线为异步链路，请使用 acompress_documents")
+
+    async def acompress_documents(
+        self,
+        documents: Sequence[Document],
+        query: str,
+        callbacks=None,
+        **kwargs,
+    ) -> Sequence[Document]:
+        if not documents:
+            return documents
+        candidates = [
+            (int(d.metadata.get("chunk_index", i)), d.page_content or "")
+            for i, d in enumerate(documents)
+        ]
+        try:
+            scores = await _gte_scores(query, candidates)
+        except Exception as e:  # noqa: BLE001 - 重排绝不拖垮主流程
+            log.warning("GteRerankCompressor 异常，原样返回：%s", e)
+            return documents
+        if scores is None:
+            return documents
+        order = _gte_order(scores)
+        out: list[Document] = []
+        for i in order:
+            if scores[i] is None:
+                out.append(documents[i])
+                continue
+            meta = {**documents[i].metadata, "rerank_score": float(scores[i])}
+            out.append(documents[i].model_copy(update={"metadata": meta}))
+        # 按量纲阈值过滤（只作用于 gte 相关分 0~1）：全部低于阈值时保底返回全部，
+        # 由调用方截 Top-K，保证「检索空 → fallback」的放大链路不触发。
+        # 无分数的候选（gte 未覆盖）是「无证据」而非「低相关」，不参与过滤。
+        thr = float(settings.RERANK_MIN_SCORE or 0.0)
+        if thr > 0:
+            kept = [
+                d
+                for d in out
+                if "rerank_score" not in d.metadata
+                or float(d.metadata["rerank_score"]) >= thr
+            ]
+            if kept:
+                out = kept
+        return out[: self.top_n] if self.top_n and len(out) > self.top_n else out
 
 
 async def rerank_rule_chunks(
@@ -190,10 +270,24 @@ async def rerank_rule_chunks(
     method = method or settings.RERANK_METHOD
     top_n = top_n or settings.RERANK_TOP_N
 
-    # 0) gte-rerank-v2：一次调用给全部候选打分（调用方已用 RERANK_TOP_N 截断过）
+    # 0) gte-rerank-v2：LangChain 组件形态（GteRerankCompressor），一次调用给全部候选
+    #    打分（调用方已用 RERANK_TOP_N 截断过）。组件内部完成重排 + RERANK_MIN_SCORE
+    #    阈值过滤（含全滤保底）；gte 不可用时组件原样返回，这里零成本回落融合分重排。
     if method == "gte":
-        reranked = await _gte_rerank(query, candidates)
-        return reranked if reranked else candidates
+        compressor = GteRerankCompressor(top_n=top_n)
+        lc_docs = [
+            Document(page_content=text or "", metadata={"chunk_index": idx})
+            for idx, text in candidates
+        ]
+        out = await compressor.acompress_documents(lc_docs, query)
+        reranked = [(int(d.metadata["chunk_index"]), d.page_content) for d in out]
+        if not reranked or all("rerank_score" not in d.metadata for d in out):
+            # gte 失败/熔断：组件已按原序返回，此时改用调用方传入的融合分重排
+            # （融合分与候选同源同序，零 API 成本；未传分数则保持原序）
+            if scores is not None and len(scores) == len(candidates):
+                return _rerank_by_scores(candidates, scores)
+            return candidates
+        return reranked
 
     # 1) 分数重排：调用方已经有可信分数时，零成本
     if method == "score" and scores is not None:
