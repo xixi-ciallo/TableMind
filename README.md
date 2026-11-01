@@ -64,20 +64,24 @@ TableMind/
 
 ## 🚀 快速开始
 
-### 1. 启动依赖服务
+### 1. 启动依赖服务（二选一）
 
-项目自带便携运行环境，位于项目内 `local-env/`（PostgreSQL 16.4 + pgvector 0.8.7 + Redis 5.0），**无需安装 Docker 或系统级数据库**：
+依赖只有 PostgreSQL（含 pgvector）+ Redis 两个服务，两条路线任选其一：
+
+**路线 A · Docker（克隆即用，推荐快速体验）**——仓库自带 [docker-compose.yml](docker-compose.yml)：
+
+```bash
+docker compose up -d db redis
+```
+
+**路线 B · 便携包（Windows 原生进程，本机长期开发推荐）**——便携运行环境位于 `local-env/`（PostgreSQL 16.4 + pgvector 0.8.7 + Redis 5.0），免装 Docker、免管理员权限：
 
 ```powershell
 .\local-env\start-env.bat      # 启动 PostgreSQL(5432) + Redis(6379)，已在运行则跳过
 .\local-env\stop-env.bat       # 停止两者
 ```
 
-便携库的默认凭据：用户名 / 密码 / 库名均为 `tablemind`，与 `.env.example` 中的 `DATABASE_URL` 保持一致。
-
-> 也可改用 `docker-compose up -d` 启动容器版 PostgreSQL（含 pgvector）与 Redis，只需保证 `DATABASE_URL` 与 `REDIS_URL` 可达，并已启用 `pgvector` 扩展。
->
-> `local-env/` 体积约 1GB，已在 `.gitignore` 中忽略；若目录丢失或换机，见下文「便携环境重建」。
+> ⚠️ `local-env/` 体积约 1GB，**不随仓库分发**（已在 `.gitignore` 中忽略）：从 GitHub clone 后该目录是空的，需按后文「便携环境重建」一次性搭建。不想折腾就直接走路线 A。两条路线的默认凭据均为 `tablemind`，与 `.env.example` 中的 `DATABASE_URL` / `REDIS_URL` 保持一致。
 
 ### 2. 配置环境变量
 
