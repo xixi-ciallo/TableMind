@@ -11,9 +11,9 @@ TableMind 是一个一体化 Web 平台，覆盖**用户端**与**管理员端**
 - **桌游信息库**：47 款桌游的结构化数据（类型、机制、人数、时长、难度等），支持多维筛选与检索；封面等静态资源随库提供。
 - **评分评测与社区**：用户收藏（想玩 / 玩过 / 拥有）、评分评测、社区发帖与评论。
 - **榜单**：BGG 极客榜只展示本站已收录、可跳转详情页的作品；本站评分榜按玩家评分取前 20 名。
-- **规则书 RAG 智能问答**：说明书中文化清洗 → 切分 → 向量化入库；答案附带规则书引用来源，模型降级时仍返回规则原文、**永不空答**。规则语料不随仓库分发，需登录管理端上传。
+- **规则书 RAG 智能问答**：说明书中文化清洗 → 切分 → 向量化入库；答案附带规则书引用来源，模型降级时仍返回规则原文、**永不空答**。站内未收录的规则可自动发起联网检索补充，站外内容明确标注来源并在末尾附免责声明，且不写入答案缓存。规则语料不随仓库分发，需登录管理端上传。
 - **Agent 对话式推荐**：三级路由（关键词优先 → 追问沿用历史 → LLM 兜底）+ 规则问答 / 个性化推荐双流水线；分层记忆（短期会话 + 长期用户画像）支撑多轮上下文；人数区间、时长上下限等槽位化筛选与流式输出。
-- **管理端**：桌游维护、标签管理、用户管理、内容审核、规则文档管理，基于 ECharts 的数据看板（核心指标卡片 + 近 30 天趋势），以及 **RAG 四维评测中心**（用例库 + 批量跑批 + LLM 裁判 + badcase 定位）与 **系统配置中心**（在线调参、即时生效、变更审计与回滚）。
+- **管理端**：桌游维护、标签管理、用户管理、内容审核、规则文档管理，基于 ECharts 的数据看板（核心指标卡片 + 近 30 天趋势），以及 **RAG 四维评测中心**（用例库 + 批量跑批 + LLM 裁判 + badcase 定位）、**Agent 轨迹回放**（每次问答的节点决策 / 观察 / 耗时逐节点回放，用于 badcase 归因）与 **系统配置中心**（在线调参、即时生效、变更审计与回滚）。
 - **质量评测（P3）**：LLM-as-judge 从 Context Recall / Context Precision / Faithfulness / Answer Relevance 四个维度给线上真实链路打分（检索 → 生成 → 裁判），输出批次均值、通过率与层级分布；改动检索或模型后跑同一题库即可做回归对比。
 
 ---
@@ -23,7 +23,7 @@ TableMind 是一个一体化 Web 平台，覆盖**用户端**与**管理员端**
 | 层 | 技术 |
 |----|------|
 | 后端 | Python · FastAPI · SQLAlchemy 2.0（全异步 asyncpg）· Alembic |
-| 数据库 / 缓存 | PostgreSQL + **pgvector**（HNSW 向量索引）· Redis（预留，当前代码未使用） |
+| 数据库 / 缓存 | PostgreSQL + **pgvector**（HNSW 向量索引）· Redis（答案缓存持久层：内存 + Redis 两级，TTL 控制） |
 | 鉴权 | JWT 无状态（用户名 / 手机号双通道登录，USER / ADMIN 角色隔离） |
 | AI / 大模型 | 百炼 DashScope OpenAI 兼容端点（模型可切换，默认 `deepseek-flash`，备用 `deepseek-v4-pro`）· `text-embedding-v1`（1536 维）· LangChain / LangGraph |
 | 检索 | pgvector **HNSW 近似检索** + BM25（jieba / 二元组）混合，可切换 RRF / 归一化加权融合，**gte-rerank-v2** 精排，**父子分块回填**；支持 HyDE；hit@5 ≈ 96% |
@@ -37,7 +37,7 @@ TableMind 是一个一体化 Web 平台，覆盖**用户端**与**管理员端**
 ```
 TableMind/
 ├── backend/                 # FastAPI 后端
-│   ├── alembic/             # 数据库迁移（19 个版本，head = l7a8b9c0d1e2）
+│   ├── alembic/             # 数据库迁移（20 个版本，head = m8b9c0d1e2f3）
 │   ├── data/                # 桌游目录 / 规则书等种子数据
 │   ├── seed_*.py            # 初始化脚本（管理员 / 桌游 / 社区 / 评分 / 规则语料）
 │   ├── run.py               # Windows 友好启动入口（SelectorEventLoop + 根目录 .env）
@@ -124,7 +124,7 @@ python seed_rulebooks.py               # 规则语料：扫描页 OCR + 切片 +
 
 | 类型 | 位置 / 命令 | 说明 |
 |------|-------------|------|
-| 结构迁移 | `backend/alembic/versions/`（`alembic upgrade head`） | 19 个 Alembic 迁移，单 head `l7a8b9c0d1e2`；覆盖 pgvector 扩展、父子分块、HNSW 索引、评测表、配置表等，**不要手写建表 SQL** |
+| 结构迁移 | `backend/alembic/versions/`（`alembic upgrade head`） | 20 个 Alembic 迁移，单 head `m8b9c0d1e2f3`；覆盖 pgvector 扩展、父子分块、HNSW 索引、评测表、配置表、Agent 轨迹表等，**不要手写建表 SQL** |
 | 管理员账号 | `seed_admin.py` | 创建 admin，幂等 |
 | 桌游目录 | `seed_catalog.py` | 从 `data/catalog.json` 导入 47 款，幂等 |
 | 社区数据 | `seed_community_refresh.py` | 玩家账号 + 帖子 + 评论，执行前**清空社区表** |
