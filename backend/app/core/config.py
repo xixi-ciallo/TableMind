@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -159,7 +161,11 @@ class Settings(BaseSettings):
     # 是否在日志里记录每次 LLM 调用的 token 用量（用于成本计量）
     LLM_LOG_USAGE: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_file 同时指向项目根 .env 与 CWD 下 .env：根 .env 保证 seed_*.py 等从 backend/
+    # 目录直接执行时也能读到根目录配置（run.py 从根目录启动时两者等价）
+    model_config = SettingsConfigDict(
+        env_file=(Path(__file__).resolve().parents[3] / ".env", ".env"), extra="ignore"
+    )
 
 
 settings = Settings()

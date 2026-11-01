@@ -86,6 +86,13 @@ cp .env.example .env
 # 编辑 .env，填入 SECRET_KEY、LLM_API_KEY、数据库连接等
 ```
 
+启动依赖后可先做一次环境自检（只读、不改数据），逐项确认 PostgreSQL / pgvector / Redis / 配置就绪：
+
+```bash
+cd backend
+python check_env.py
+```
+
 ### 3. 后端
 
 ```bash
@@ -105,6 +112,16 @@ PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 8000
 > 若使用非 pgvector 官方镜像的 PostgreSQL，请先在目标库执行 `CREATE EXTENSION vector`（需实例已安装 pgvector 扩展包），否则迁移报 `type "vector" does not exist`。
 
 ### 4. 初始化数据（管理员 + 桌游库 + 社区）
+
+一键串联（推荐，按依赖顺序执行、失败即停）：
+
+```bash
+cd backend
+python seed_all.py                   # 管理员 + 桌游 + 社区 + 评分 + 官方资讯
+python seed_all.py --with-rulebooks  # 追加规则语料（逐页 OCR + 向量化，耗时长，可选）
+```
+
+或按依赖顺序手动执行（与上面等价）：
 
 ```bash
 cd backend
@@ -174,12 +191,9 @@ npm run dev                            # 开发服务器默认 http://localhost:
 
 ```powershell
 alembic upgrade head
-python seed_admin.py
-python seed_catalog.py
-python seed_community_refresh.py
-python seed_reviews.py
-python seed_official_news.py
-python seed_rulebooks.py               # 规则语料（逐页 OCR，约 40 分钟以上）
+python check_env.py                    # 环境自检（可选）
+python seed_all.py                     # 一键初始化全部种子数据
+python seed_all.py --with-rulebooks    # 规则语料（逐页 OCR，约 40 分钟以上）
 ```
 
 > ⚠️ `local-env\pgdata` 是唯一的数据载体，删除即等于清库，迁移或清理时请勿误删。误删后可用上面这几个种子脚本恢复桌游、账号、社区与评分，再跑 `seed_rulebooks.py` 重建规则语料；历史会话与评测用例没有备份，无法恢复。
