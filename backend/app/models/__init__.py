@@ -1,3 +1,4 @@
+from app.models.agent_trace import AgentRun, AgentStep
 from app.models.app_config import AppConfig, AppConfigAudit
 from app.models.board_game import BoardGame
 from app.models.chat import AnswerFeedback, ChatMessage, ChatSession
@@ -16,6 +17,8 @@ from app.models.user import User
 from app.models.user_memory import UserMemoryEpisode, UserProfile
 
 __all__ = [
+    "AgentRun",
+    "AgentStep",
     "AppConfig",
     "AppConfigAudit",
     "User",

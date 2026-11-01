@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import require_admin
 from app.api.admin import (
+    agent_runs,
     configs,
     evals,
     games,
@@ -29,3 +30,5 @@ router.include_router(rule_books.router, tags=["admin-rule-books"])
 router.include_router(evals.router, tags=["admin-evals"])
 # P4 系统配置：/configs 与 /configs/audits
 router.include_router(configs.router, tags=["admin-configs"])
+# Agentic RAG 运行轨迹：/agent-runs（badcase 逐节点回放）
+router.include_router(agent_runs.router, tags=["admin-agent-runs"])

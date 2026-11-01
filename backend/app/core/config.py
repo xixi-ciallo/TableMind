@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     AGENTIC_CHECK_ENABLED: bool = True
     # L1 结构化资料是否再用 LLM 判定「是否足以回答」；默认关闭以控制首字延迟。
     AGENTIC_GRADE_LLM_ENABLED: bool = False
+    # 节点级执行轨迹（agent_run / agent_step）落库：badcase 逐节点回放与性能分析用。
+    # 每轮结束用独立短会话追加写入一次，失败不影响主流程；不需要时置 False 停写。
+    AGENTIC_TRACE_ENABLED: bool = True
 
     # ---- 工程化：延迟与成本治理 ----
     # 规则问答/改写是否使用独立模型（建议配一个「非推理」模型以获得更低首字延迟）；
@@ -79,6 +82,9 @@ class Settings(BaseSettings):
     LLM_RULE_THINKING: bool = False
     # 热点答案缓存：高频/近似重复的规则问题直接返回，首字延迟≈0
     ANSWER_CACHE_ENABLED: bool = True
+    # 缓存后端："redis"=进程内存热层 + Redis 持久层（重启不丢、多 worker 共享），
+    # "memory"=仅进程内 LRU（老行为）。Redis 不可用时自动回落 memory，best-effort。
+    ANSWER_CACHE_BACKEND: str = "redis"
     ANSWER_CACHE_TTL_SEC: int = 86400
     ANSWER_CACHE_SIMILARITY: float = 0.93  # embedding 余弦≥此值视为同一问题（近似命中）
     # 灰度：按概率把流量从 Agent(路由+流水线) 切到固定 RAG 路径，用于对比延迟/准确率

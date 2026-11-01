@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TableMind · 系统架构</title>
+<style>
+  :root{
+    --ink:#1c2b3a;
+    --muted:#5c6b7c;
+    --sec-line:#7fbf9f;
+    --sec-bg:#fbfefd;
+    --node-bg:#e9f6ec;
+    --node-line:#86c79c;
+    --node-ink:#14602f;
+    --blue-bg:#ddeefa;
+    --blue-line:#8fb8dd;
+    --blue-ink:#14538f;
+    --bar-bg:#f0f2f5;
+    --bar-line:#c8ced6;
+    --pink-bg:#fdeef2;
+    --pink-line:#e8a8bc;
+    --pink-ink:#b03050;
+    --note-bg:#fdf6d0;
+    --note-line:#e2cc72;
+    --note-ink:#7a5c0e;
+    --agent-line:#d478b8;
+    --agent-bg:#fdf5fa;
+    --agent-ink:#a03080;
+    --arrow:#55606c;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#eef1f4;color:var(--ink);
+    font-family:"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .page{max-width:1240px;margin:20px auto 36px;padding:0 16px}
+  .canvas{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:26px 28px 24px;
+    box-shadow:0 16px 44px rgba(15,23,42,.07)}
+
+  /* ---------- 头部 ---------- */
+  .doc-head{text-align:center}
+  .doc-head h1{margin:0;font-size:26px;font-weight:800;letter-spacing:.5px;color:#101826}
+  .techline{margin:10px auto 0;font-size:12px;color:#6a7686;font-weight:600}
+  .techline i{font-style:normal;color:#b6c0cc;padding:0 8px}
+  .desc{margin:10px auto 0;max-width:1120px;color:#5a6878;font-size:12px;line-height:1.75;text-align:center}
+  .desc b{color:#1c3a5c}
+
+  /* ---------- 分组 ---------- */
+  .sec{margin-top:16px;padding:12px 14px 14px;border-radius:12px;border:1.6px dashed var(--sec-line);
+    background:var(--sec-bg)}
+  .sec-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .num{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+    background:#2f9d63;color:#fff;font-size:12px;font-weight:800;flex:none}
+  .sec-title{font-size:14.5px;font-weight:800;color:#1c4a30}
+  .sec-sub{font-size:11px;color:#74838f}
+  .sec-body{min-width:0}
+
+  /* ---------- 节点 ---------- */
+  .node{border-radius:8px;padding:8px 12px 9px;text-align:center;border:1.3px solid var(--node-line);
+    background:var(--node-bg)}
+  .node .t{font-size:12.5px;font-weight:800;color:var(--node-ink);line-height:1.5}
+  .node .s{font-size:10.4px;color:#57676f;line-height:1.6;margin-top:2px}
+  .node.blue{background:var(--blue-bg);border-color:var(--blue-line)}
+  .node.blue .t{color:var(--blue-ink)}
+  .node .api{margin-top:5px;padding-top:4px;border-top:1px dashed rgba(30,80,120,.18);
+    font-size:10px;color:#3d5a74;line-height:1.6}
+  .node .api b{font-weight:800;color:#1c4a6e}
+  .node .extra{margin-top:4px;font-size:10px;color:#74838f;line-height:1.55}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+
+  .bar{margin-top:12px;padding:8px 14px;border-radius:8px;text-align:center;
+    background:var(--bar-bg);border:1.2px solid var(--bar-line);
+    color:#2c3a48;font-size:11.4px;font-weight:700;line-height:1.7}
+  .bar .lt{color:#8a96a2;font-weight:400;padding:0 7px}
+
+  /* 分叉箭头：接入层 → ② / ③ */
+  .branch{display:grid;grid-template-columns:.92fr 1.3fr;gap:14px;margin:2px 0}
+  .branch div{text-align:center;color:var(--arrow);font-size:14px;line-height:1;height:16px}
+
+  /* ---------- ② / ③ 双链路（SVG 连线版） ---------- */
+  .split-heads{display:grid;grid-template-columns:.93fr 1.37fr;gap:14px;align-items:end}
+  .split-heads .sec-head{margin-bottom:8px}
+  .split-notes{display:grid;grid-template-columns:.93fr 1.37fr;gap:14px;margin-top:10px}
+  .split-notes .note{margin-top:0}
+  .graph-wrap.neutral{border-color:#dfe7ee}
+
+  .note{margin-top:10px;padding:7px 10px;border-radius:7px;background:var(--note-bg);
+    border:1px dashed var(--note-line);color:var(--note-ink);font-size:10.3px;line-height:1.65}
+  .note b{color:#6b4f05}
+  .strip-note{margin-top:7px;padding:6px 10px;border-radius:6px;background:#f1f7f3;
+    border:1px dashed #c4dfcd;color:#506b5b;font-size:10.2px;line-height:1.6}
+
+  /* ---------- ④ Agentic RAG ---------- */
+  .sec-agent{border-color:var(--agent-line);background:var(--agent-bg)}
+  .sec-agent .num{background:#c2499a}
+  .sec-agent .sec-title{color:var(--agent-ink)}
+  .sec-agent .sec-sub{color:#a86a92}
+  .graph-wrap{overflow-x:auto;background:#fff;border:1px solid #ead8e6;border-radius:10px;padding:6px 8px}
+  .graph{display:block;width:100%;min-width:1080px;height:auto}
+  .legend{display:flex;flex-wrap:wrap;justify-content:center;gap:8px 20px;margin-top:10px;
+    padding-top:9px;border-top:1px dashed #e3d3e0;font-size:10.3px;color:#6d7a86}
+  .lg{display:flex;align-items:center;gap:6px}
+  .sw{width:18px;height:9px;border-radius:3px;border:1px solid}
+  .sw-g{background:#dcf5e6;border-color:#a5d9bc}
+  .sw-p{background:#fde2ec;border-color:#eea9c3}
+  .sw-n{background:#fdf4c6;border-color:#e6cf7e}
+  .sw-b{background:#dbeafe;border-color:#93bbe8}
+  .sw-o{background:#fdf1e3;border-color:#dcb98a}
+
+  /* ---------- ⑤ 记忆 / 评测 / 配置 ---------- */
+  .col{display:flex;flex-direction:column;background:#fff;border:1px solid #d8e2ec;border-radius:9px;
+    padding:10px 12px 11px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+  .col-head{font-size:12px;font-weight:800;color:#135c9c;margin-bottom:7px;line-height:1.5}
+  .col-head span{display:inline-block;padding:1px 6px;margin-left:6px;border-radius:4px;
+    background:#eef4fb;border:1px solid #d7e5f4;color:#3b6f9e;font-size:9.5px;font-weight:700}
+  ul.mini{margin:0;padding:0;list-style:none}
+  ul.mini li{position:relative;padding-left:11px;font-size:10.4px;line-height:1.72;color:#4b5b6b}
+  ul.mini li::before{content:"";position:absolute;left:1px;top:.62em;width:4px;height:4px;
+    border-radius:50%;background:#8fb3a0}
+  ul.mini li b{color:#174a33}
+  .kpi{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0 2px}
+  .kpi span{font-size:9.5px;padding:2px 6px;border-radius:999px;background:#eef4fb;
+    border:1px solid #d7e5f4;color:#2f5f88}
+  .closing{margin-top:11px;padding:6px 12px;border-radius:6px;background:#f1f7f3;
+    border:1px dashed #c4dfcd;color:#4c6b5b;font-size:10.4px;line-height:1.65;text-align:center}
+
+  /* ---------- ⑥ 底座 ---------- */
+  .cyl{position:relative;background:#fbf3d0;border:1.3px solid #dfc878;border-radius:12px 12px 15px 15px;
+    padding:15px 12px 9px;text-align:center}
+  .cyl::before{content:"";position:absolute;top:-7px;left:-1.3px;right:-1.3px;height:14px;
+    border-radius:50%;background:#fdf6d8;border:1.3px solid #dfc878}
+  .cyl>*{position:relative}
+  .cyl.blue{background:#e3eefb;border-color:#9cbde0}
+  .cyl.blue::before{background:#ecf3fc;border-color:#9cbde0}
+  .cyl .t{font-size:11.8px;font-weight:800;line-height:1.45;margin-bottom:3px;color:#8a6a12}
+  .cyl.blue .t{color:#1d5b8f}
+  .cyl .s{font-size:10px;line-height:1.6;color:#5b6b7b}
+  .cylsvg{display:block;width:100%;max-width:330px;height:auto;margin:0 auto}
+  .cylobj .t{font-size:11.8px;font-weight:800;line-height:1.45;margin-bottom:3px;color:#8a6a12}
+  .cylobj.blue .t{color:#1d5b8f}
+  .cylobj .s{font-size:10px;line-height:1.62;color:#5b6b7b}
+  .grid-4 .base{display:flex;flex-direction:column;justify-content:center}
+  .base{padding:9px 12px 10px;border-radius:9px;border:1.2px solid;text-align:center;
+    box-shadow:0 1px 2px rgba(15,23,42,.04)}
+  .base .t{font-size:11.6px;font-weight:800;line-height:1.5;margin-bottom:3px}
+  .base .s{font-size:10.1px;line-height:1.62;color:#5b6b7b}
+  .base.by{background:#fdf8e0;border-color:#e6d189}
+  .base.by .t{color:#8a6a12}
+  .base.bg{background:#eaf7ee;border-color:#a9d8ba}
+  .base.bg .t{color:#0e6b3b}
+
+  .foot{margin-top:14px;text-align:center;font-size:10px;color:#94a3b8;line-height:1.6}
+
+  @media (max-width:1080px){
+    .canvas{padding:20px 16px}
+    .grid-2,.grid-3,.grid-4{grid-template-columns:1fr}
+    .branch{display:none}
+    .split-heads,.split-notes{grid-template-columns:1fr}
+  }
+  @media print{
+    html,body{background:#fff}
+    .page{margin:0;max-width:none;padding:0}
+    .canvas{border:none;box-shadow:none;padding:0}
+    .graph-wrap{overflow:visible}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="canvas">
+
+    <!-- ============ 标题 ============ -->
+    <header class="doc-head">
+      <h1>TableMind · 桌游信息与 AI 智能问答平台 · 系统架构</h1>
+      <div class="techline">FastAPI + SQLAlchemy 2.0 全异步 + LangChain / LangGraph<i>|</i>混合检索（pgvector + BM25）· Rerank 重排 · 父子分块回填<i>|</i>Agentic RAG 自主决策 · 四指标评测</div>
+      <p class="desc">
+        平台覆盖 <b>用户端</b> 与 <b>管理端</b> 双应用：47 款桌游的结构化信息库、BGG / 站内双榜单、评分评测与社区、收藏与个人中心；
+        AI 侧提供规则书 RAG 智能问答（分层检索 L1–L4 + 引用溯源 + Agentic 状态图）与对话式个性化推荐（Orchestrator + 确定性 Router + 分层记忆）；
+        管理端另有 RAG 四维评测中心与运行时配置中心，形成「改配置 → 跑评测 → 看分数 → 保留或回滚」的质量闭环。
+      </p>
+    </header>
+
+    <!-- ============ ① 接入层 ============ -->
+    <section class="sec">
+      <div class="sec-head">
+        <span class="num">1</span>
+        <span class="sec-title">接入层 · React 18 + TypeScript + Ant Design + Vite + ECharts</span>
+        <span class="sec-sub">双应用共享登录态 · 路由级懒加载 · 桌面 / 移动端自适应</span>
+      </div>
+      <div class="sec-body">
+        <div class="grid-2">
+          <div class="node blue">
+            <div class="t">用户端 App</div>
+            <div class="s">AI 助手（规则问答 / 推荐）· SSE 逐字渲染 · 桌游库 / 详情（封面 / 规则书 / 视频）<br>榜单（BGG 极客榜 / 站内 Top 20）· 社区（帖子 / 评论 / 投票）· 收藏 / 个人中心 · 登录 / 注册</div>
+            <div class="api"><b>/api</b>：auth · games · rankings · reviews · posts / comments · collections · search · ai · me</div>
+            <div class="extra">React Router 6 懒加载 · Zustand 登录态 · Axios 走 /api 代理 · 移动端 TabBar</div>
+          </div>
+          <div class="node blue">
+            <div class="t">管理端 Admin</div>
+            <div class="s">数据看板（核心指标 + 30 天趋势）· 桌游 / 标签维护 · 规则文档（上传 / OCR / 切片）<br>用户管理 / 内容审核 · RAG 评测中心（跑批 / badcase）· 系统配置中心（调参 / 审计 / 回滚）</div>
+            <div class="api"><b>/api/admin</b>（require_admin）：stats · games · tags · users · moderation · rule-docs · rule-books · evals · configs</div>
+            <div class="extra">AdminGuard 角色守卫 · ECharts 看板 · 权限与操作审计 · 与用户端共用同一套后端</div>
+          </div>
+        </div>
+        <div class="bar">FastAPI 路由层<span class="lt">｜</span>JWT 无状态鉴权（USER / ADMIN）· CORS · /uploads 静态资源 · SSE 流式响应 · Pydantic 出入参校验 · 统一异常处理<span class="lt">｜</span>SQLAlchemy 2.0 AsyncSession（asyncpg）· 19 个 Alembic 迁移 · 搜索关键词落 SearchLog</div>
+      </div>
+    </section>
+
+    <!-- 接入层 → ② / ③ 分叉 -->
+    <div class="branch" aria-hidden="true"><div>↓</div><div>↓</div></div>
+
+    <!-- ============ ② / ③ 双链路（SVG 连线版） ============ -->
+    <section class="sec">
+      <div class="split-heads">
+        <div class="sec-head">
+          <span class="num">2</span>
+          <span class="sec-title">规则语料入库链路（离线）</span>
+        </div>
+        <div class="sec-head">
+          <span class="num">3</span>
+          <span class="sec-title">AI 问答与检索链路（在线）</span>
+          <span class="sec-sub">SSE 流式 · 三级降级 · 开关与阈值在配置中心可调</span>
+        </div>
+      </div>
+      <div class="sec-body">
+        <div class="graph-wrap neutral">
+          <svg class="graph" viewBox="0 0 1180 950" role="img" aria-label="规则语料入库链路（离线）与 AI 问答检索链路（在线）">
+            <defs>
+              <marker id="saA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                <path d="M0,0 L10,5 L0,10 z" fill="#55606c"/>
+              </marker>
+            </defs>
+            <!-- ② 左列：入库链 -->
+            <rect x="50" y="20" width="420" height="56" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="260" y="42" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">规则书上传</text>
+            <text x="260" y="61" text-anchor="middle" font-size="10.4" fill="#57676f">PDF / 逐页图片 · 管理员上传或站内扫描页</text>
+            <path d="M260,76 L260,92" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="50" y="96" width="420" height="68" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="260" y="117" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">内容抽取</text>
+            <text x="260" y="135" text-anchor="middle" font-size="10.4" fill="#57676f">PDF → pypdf 抽字；图片 → qwen-vl-ocr 视觉模型</text>
+            <text x="260" y="149" text-anchor="middle" font-size="10.4" fill="#57676f">模型候选链自动回退 · 去除 OCR 输出的 HTML 标签</text>
+            <path d="M260,164 L260,180" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="50" y="184" width="420" height="56" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="260" y="206" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">中文文本清洗</text>
+            <text x="260" y="225" text-anchor="middle" font-size="10.4" fill="#57676f">去控制字符 / 页码 / 重复页眉页脚</text>
+            <path d="M260,240 L260,256" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="50" y="260" width="420" height="68" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="260" y="281" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">父子分块</text>
+            <text x="260" y="299" text-anchor="middle" font-size="10.4" fill="#57676f">按章节标题切父片 · 子片带重叠窗口</text>
+            <text x="260" y="313" text-anchor="middle" font-size="10.4" fill="#57676f">无标题文本按段落打包，不硬切段落</text>
+            <path d="M260,328 L260,344" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="50" y="348" width="420" height="56" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="260" y="370" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">切片落库 rule_documents</text>
+            <text x="260" y="389" text-anchor="middle" font-size="10.4" fill="#57676f">game_id · rule_book_id · chunk_index · parent_index</text>
+            <path d="M260,404 L260,420" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="50" y="424" width="420" height="56" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="260" y="446" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">Embedding 向量化</text>
+            <text x="260" y="465" text-anchor="middle" font-size="10.4" fill="#57676f">text-embedding-v1 · 1536 维（与 Vector(1536) 对齐）</text>
+            <path d="M260,480 L260,496" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <!-- pgvector 向量表（圆柱） -->
+            <path d="M60,514 L60,566 A205,14 0 0 0 470,566 L470,514 Z" fill="#fbf3d0" stroke="#dfc878" stroke-width="1.3"/>
+            <ellipse cx="265" cy="514" rx="205" ry="14" fill="#fdf6d8" stroke="#dfc878" stroke-width="1.3"/>
+            <text x="265" y="540" text-anchor="middle" font-size="12" font-weight="800" fill="#8a6a12">pgvector 向量表</text>
+            <text x="265" y="556" text-anchor="middle" font-size="10.2" fill="#7a641f">rule_documents.embedding · 1536 维 · ② 入库产物</text>
+            <text x="265" y="571" text-anchor="middle" font-size="10.2" fill="#7a641f">HNSW · m=16 / ef_construction=64 / cosine</text>
+            <!-- 列分隔虚线 -->
+            <line x1="505" y1="12" x2="505" y2="938" stroke="#c3cdd6" stroke-width="1" stroke-dasharray="6 6"/>
+            <!-- ② 向量表 → ③ 向量检索：跨列肘形连线 -->
+            <path d="M470,540 L508,540 Q512,540 512,536 L512,532 Q512,528 516,528 L544,528" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <!-- ③ 右列：在线链 -->
+            <rect x="548" y="20" width="608" height="64" rx="8" fill="#ddeefa" stroke="#8fb8dd" stroke-width="1.3"/>
+            <text x="852" y="41" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14538f">用户提问 · AI 助手</text>
+            <text x="852" y="60" text-anchor="middle" font-size="10.4" fill="#57676f">多轮会话 · 指定单款 / 多款游戏</text>
+            <text x="852" y="74" text-anchor="middle" font-size="10.4" fill="#57676f">上下文装配：近期 ChatMessage + 对话状态（AsyncPostgresStore）+ 用户画像 / 情景记忆</text>
+            <path d="M852,84 L852,100" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="104" width="608" height="64" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="852" y="125" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">Orchestrator 主 Agent · LLM function-calling</text>
+            <text x="852" y="144" text-anchor="middle" font-size="10.4" fill="#57676f">2 个业务级工具：invoke_rule_agent / invoke_recommend_agent</text>
+            <text x="852" y="158" text-anchor="middle" font-size="10.4" fill="#57676f">最多 2 次工具调用 + 90s 墙钟 · 单意图透传，复合意图并行后合成</text>
+            <path d="M852,168 L852,194" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="636" y="173" width="210" height="18" rx="9" fill="#fdeef2" stroke="#e8a8bc"/>
+            <text x="741" y="186" text-anchor="middle" font-size="10" font-weight="700" fill="#b03050">LLM 不可用 / 出错 · 自动回落</text>
+            <rect x="548" y="198" width="608" height="64" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="852" y="219" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">确定性 Router · 兜底派发</text>
+            <text x="852" y="238" text-anchor="middle" font-size="10.4" fill="#57676f">关键词优先（不花 token）→ LLM 结构化路由（rule / rec / clarify）</text>
+            <text x="852" y="252" text-anchor="middle" font-size="10.4" fill="#57676f">冲突或无命中交 LLM；仍不可用则固定 RAG 工作流</text>
+            <!-- Router → 双副 Agent 分叉 -->
+            <path d="M852,262 L852,270" fill="none" stroke="#55606c" stroke-width="1.5"/>
+            <path d="M852,270 L728,270 Q724,270 724,274 L724,278" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <path d="M852,270 L1032,270 Q1036,270 1036,274 L1036,278" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="282" width="352" height="72" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="724" y="301" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">规则问答副 Agent</text>
+            <text x="724" y="318" text-anchor="middle" font-size="10.4" fill="#57676f">分层检索 L1 → L4 + 带引用生成</text>
+            <text x="724" y="331" text-anchor="middle" font-size="10.4" fill="#57676f">答案缓存 L1–L3 · LRU + TTL</text>
+            <text x="724" y="344" text-anchor="middle" font-size="10.4" fill="#57676f">L2 规则书走下方检索管线</text>
+            <rect x="916" y="282" width="240" height="72" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="1036" y="301" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">推荐副 Agent</text>
+            <text x="1036" y="318" text-anchor="middle" font-size="10.4" fill="#57676f">个性化推荐管线（下方，与左侧不同）</text>
+            <text x="1036" y="331" text-anchor="middle" font-size="10.4" fill="#57676f">指名游戏 → game_focus_stream</text>
+            <!-- 规则问答分支 → 查询改写 -->
+            <path d="M724,354 L724,390" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="736" y="362" width="250" height="18" rx="9" fill="#fdeef2" stroke="#e8a8bc"/>
+            <text x="861" y="375" text-anchor="middle" font-size="10" font-weight="700" fill="#b03050">规则问答分支 · L2 规则书检索管线</text>
+            <!-- 推荐分支 → 候选池筛选 -->
+            <path d="M1036,354 L1036,390" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="394" width="352" height="76" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="724" y="415" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">查询改写 · 检索前置</text>
+            <text x="724" y="432" text-anchor="middle" font-size="10.4" fill="#57676f">多查询扩展（口语 → 规则书措辞，硬币→钱币）</text>
+            <text x="724" y="446" text-anchor="middle" font-size="10.4" fill="#57676f">+ HyDE 假设答案（并行，默认关）</text>
+            <text x="724" y="460" text-anchor="middle" font-size="10.4" fill="#57676f">带近 3 轮历史同调用完成指代消解 · 零额外延迟</text>
+            <!-- 查询改写 → 双路检索：T 形分叉 -->
+            <path d="M724,470 L724,478" fill="none" stroke="#55606c" stroke-width="1.5"/>
+            <path d="M724,478 L636,478 Q632,478 632,482 L632,486" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <path d="M724,478 L828,478 Q832,478 832,482 L832,486" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="490" width="168" height="76" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="632" y="511" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">向量检索</text>
+            <text x="632" y="529" text-anchor="middle" font-size="10.4" fill="#57676f">pgvector HNSW</text>
+            <text x="632" y="543" text-anchor="middle" font-size="10.4" fill="#57676f">余弦 Top-N</text>
+            <text x="632" y="557" text-anchor="middle" font-size="10.4" fill="#57676f">改写多路 + HyDE 最高分</text>
+            <rect x="732" y="490" width="168" height="76" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="816" y="511" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">BM25 检索</text>
+            <text x="816" y="529" text-anchor="middle" font-size="10.4" fill="#57676f">jieba 分词 / 二元组</text>
+            <text x="816" y="543" text-anchor="middle" font-size="10.4" fill="#57676f">分数无上界</text>
+            <text x="816" y="557" text-anchor="middle" font-size="10.4" fill="#57676f">原查询 + 改写 · 无 HyDE</text>
+            <!-- 双路汇合 → 融合：干净 T 形接头 -->
+            <path d="M632,566 L632,578 L716,578" fill="none" stroke="#55606c" stroke-width="1.5"/>
+            <path d="M816,566 L816,578 L732,578" fill="none" stroke="#55606c" stroke-width="1.5"/>
+            <path d="M724,578 L724,586" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="590" width="352" height="76" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="724" y="611" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">归一化加权融合（score，非 RRF）</text>
+            <text x="724" y="628" text-anchor="middle" font-size="10.4" fill="#57676f">两路各自按最大值归一化到 [0,1]</text>
+            <text x="724" y="642" text-anchor="middle" font-size="10.4" fill="#57676f">后加权求和（向量 1.0 / BM25 1.6）+ 章节加权</text>
+            <text x="724" y="656" text-anchor="middle" font-size="10.4" fill="#57676f">VEC_MIN_SIM=0.30 过滤无向量证据低分片</text>
+            <path d="M724,666 L724,678" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="682" width="352" height="76" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="724" y="703" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">Rerank 重排 · gte-rerank-v2</text>
+            <text x="724" y="720" text-anchor="middle" font-size="10.4" fill="#57676f">交叉编码 · 自写 LangChain 重排组件</text>
+            <text x="724" y="734" text-anchor="middle" font-size="10.4" fill="#57676f">只对 Top-N=15 精排（默认开启，可关）</text>
+            <text x="724" y="748" text-anchor="middle" font-size="10.4" fill="#57676f">MIN_SCORE 滤空保底 · 403 熔断回落融合分</text>
+            <path d="M724,758 L724,770" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="548" y="774" width="352" height="76" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="724" y="795" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">父块回填（小块找 / 大块答）</text>
+            <text x="724" y="812" text-anchor="middle" font-size="10.4" fill="#57676f">整父块回填 · 限长 1600 字 · 同父去重</text>
+            <text x="724" y="826" text-anchor="middle" font-size="10.4" fill="#57676f">历史数据回落子片</text>
+            <text x="724" y="840" text-anchor="middle" font-size="10.4" fill="#57676f">窗口细裁 PARENT_WINDOW 默认关</text>
+            <path d="M724,850 L724,862" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <!-- 推荐分支：候选池筛选 → 内容过滤排序 → 协同过滤 → LLM 写理由 -->
+            <rect x="916" y="394" width="240" height="60" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="1036" y="415" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">候选池筛选</text>
+            <text x="1036" y="433" text-anchor="middle" font-size="10.4" fill="#57676f">人数 / 时长 / 类型机制硬过滤</text>
+            <text x="1036" y="447" text-anchor="middle" font-size="10.4" fill="#57676f">0 条时逐步放宽条件重筛</text>
+            <path d="M1036,454 L1036,466" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="916" y="470" width="240" height="60" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="1036" y="491" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">内容过滤排序</text>
+            <text x="1036" y="509" text-anchor="middle" font-size="10.4" fill="#57676f">分类 / 机制标签覆盖 50/50</text>
+            <text x="1036" y="523" text-anchor="middle" font-size="10.4" fill="#57676f">「类似 X」按标签相似度排序</text>
+            <path d="M1036,530 L1036,542" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="916" y="546" width="240" height="60" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="1036" y="567" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">协同过滤</text>
+            <text x="1036" y="585" text-anchor="middle" font-size="10.4" fill="#57676f">基于评分 item-based CF</text>
+            <text x="1036" y="599" text-anchor="middle" font-size="10.4" fill="#57676f">评分不足降级 · 如实标注未启用</text>
+            <path d="M1036,606 L1036,618" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <rect x="916" y="622" width="240" height="60" rx="8" fill="#e9f6ec" stroke="#86c79c" stroke-width="1.3"/>
+            <text x="1036" y="643" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14602f">LLM 写推荐理由</text>
+            <text x="1036" y="661" text-anchor="middle" font-size="10.4" fill="#57676f">按 rank 取 1 主推 + 2 备选</text>
+            <text x="1036" y="675" text-anchor="middle" font-size="10.4" fill="#57676f">参照游戏写相似点 + 差异点</text>
+            <path d="M1036,682 L1036,862" fill="none" stroke="#55606c" stroke-width="1.5" marker-end="url(#saA)"/>
+            <text x="1046" y="768" font-size="9.5" fill="#8a96a2">推荐结果同样走</text>
+            <text x="1046" y="782" font-size="9.5" fill="#8a96a2">SSE 流式输出</text>
+            <rect x="548" y="866" width="608" height="64" rx="8" fill="#ddeefa" stroke="#8fb8dd" stroke-width="1.3"/>
+            <text x="852" y="887" text-anchor="middle" font-size="12.5" font-weight="800" fill="#14538f">SSE 流式输出 · 8 类事件</text>
+            <text x="852" y="906" text-anchor="middle" font-size="10.4" fill="#57676f">route / level / citations / notice / delta / done 等（另有 info / tool / thinking）</text>
+            <text x="852" y="920" text-anchor="middle" font-size="10.4" fill="#57676f">逐字渲染 + 引用卡片 + L1–L4 层级标签 + 有用 / 没用反馈（AnswerFeedback）</text>
+          </svg>
+        </div>
+      </div>
+      <div class="split-notes">
+        <div>
+          <div class="note"><b>入库约束</b>：同列禁止混用嵌入模型；换模型须全量 reembed。原始说明书存 <b>rule_books</b> 供前台翻阅，切片只服务 RAG 检索。</div>
+          <div class="strip-note">批量重建：<b>seed_rulebooks.py</b> 逐页 OCR → 切片 → 向量化；OCR 结果缓存 logs/rule_ocr，中断可续跑。</div>
+        </div>
+        <div class="note"><b>降级链，永不空答</b>：Orchestrator → 确定性 Router → 固定 RAG 工作流 → 站内检索兜底；Agentic RAG 任一节点异常同样回落旧流水线。</div>
+      </div>
+    </section>
+
+    <!-- ============ ④ Agentic RAG 状态图 ============ -->
+    <section class="sec sec-agent">
+      <div class="sec-head">
+        <span class="num">4</span>
+        <span class="sec-title">Agentic RAG · LangGraph 状态图（可开关，异常自动回落旧流水线）</span>
+        <span class="sec-sub">rewrite → retrieve → grade → generate → check · 条件边驱动重试与降级，代码只设循环上限（检索管线细节见 ③）</span>
+      </div>
+      <div class="sec-body">
+        <div class="graph-wrap">
+          <svg class="graph" viewBox="0 0 1180 950" role="img" aria-labelledby="graphTitle">
+            <title id="graphTitle">TableMind Agentic RAG LangGraph 状态图</title>
+            <defs>
+              <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="#5b6b7d"/>
+              </marker>
+              <marker id="arP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="#8b5cf6"/>
+              </marker>
+              <marker id="arB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="#b07a3a"/>
+              </marker>
+              <filter id="ns" x="-20%" y="-20%" width="140%" height="160%">
+                <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.07"/>
+              </filter>
+            </defs>
+
+            <!-- 顶部橙色虚线批注：复用 ③ -->
+            <g>
+              <rect x="30" y="10" width="318" height="54" rx="8" fill="#fffdf4" stroke="#e2b45a" stroke-width="1.1" stroke-dasharray="5 4"/>
+              <text x="42" y="30" font-size="10" font-weight="700" fill="#b07a1a">retrieve 直调 ③ 同一条检索函数（非工具调用）↗</text>
+              <text x="42" y="50" font-size="9.4" fill="#c08a2a">向量 + BM25 → 加权融合（score）→ gte-rerank-v2 精排 → 父块回填</text>
+            </g>
+
+            <!-- 便签：左 -->
+            <g>
+              <rect x="36" y="84" width="250" height="172" rx="8" fill="#fdf4c6" stroke="#e6cf7e" stroke-width="1.1"/>
+              <text x="48" y="104" font-size="10.5" font-weight="700" fill="#8a6a12">有界自主 · 状态约束</text>
+              <text x="48" y="123" font-size="9.7" fill="#7a5c0e">· rewrite 首轮原样透传（确定性拼接，无 LLM）</text>
+              <text x="48" y="140" font-size="9.7" fill="#7a5c0e">· 重试轮叠加规则书措辞后缀换问法</text>
+              <text x="48" y="157" font-size="9.7" fill="#7a5c0e">· 指代消解合并进 ③ 检索改写调用</text>
+              <text x="48" y="174" font-size="9.7" fill="#7a5c0e">· retrieval_attempts ≤ 3（含首次）</text>
+              <text x="48" y="191" font-size="9.7" fill="#7a5c0e">· L2/L3 必走 LLM 裁判：是否命中所问对象</text>
+              <text x="48" y="208" font-size="9.7" fill="#7a5c0e">· L1 规则判定为主，LLM 判定可选（默认关）</text>
+              <text x="48" y="225" font-size="9.7" fill="#7a5c0e">· fallback / &lt;20 字短答跳过 check 校验</text>
+              <text x="48" y="242" font-size="9.7" fill="#7a5c0e">· 任何节点异常 → 回落旧流水线</text>
+            </g>
+
+            <!-- 便签：轨迹落库（同参考图画法，虚线指向状态图） -->
+            <g>
+              <rect x="36" y="330" width="250" height="80" rx="8" fill="#fdf4c6" stroke="#e6cf7e" stroke-width="1.1"/>
+              <text x="48" y="352" font-size="10.5" font-weight="700" fill="#8a6a12">每个节点都落一条 agent_step</text>
+              <text x="48" y="370" font-size="9.7" fill="#7a5c0e">节点名 / 入参 / 出参 / 状态 / 耗时</text>
+              <text x="48" y="390" font-size="9.7" fill="#7a5c0e">agent_run 主记录 + 前端执行时间线回放</text>
+            </g>
+            <path fill="none" d="M288,368 L422,282" stroke="#d09a2a" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#arB)"/>
+
+            <!-- 便签：右上（检索分层） -->
+            <g>
+              <rect x="912" y="52" width="236" height="150" rx="8" fill="#fdf4c6" stroke="#e6cf7e" stroke-width="1.1"/>
+              <text x="924" y="72" font-size="10.5" font-weight="700" fill="#8a6a12">检索分层 · 引用必须标注</text>
+              <text x="924" y="92" font-size="9.4" fill="#7a5c0e">L1 本站结构化资料（人数 / 时长 / 机制）</text>
+              <text x="924" y="109" font-size="9.4" fill="#7a5c0e">L2 规则书原文（权威来源）</text>
+              <text x="924" y="126" font-size="9.4" fill="#7a5c0e">L3 BGG 社区共识（默认关闭）</text>
+              <text x="924" y="143" font-size="9.4" fill="#7a5c0e">L4 模型推测（必须标注未验证）</text>
+              <text x="924" y="166" font-size="8.9" fill="#8a6a12">L3 实测 401 拿不到数据 →</text>
+              <text x="924" y="181" font-size="8.9" fill="#8a6a12">没数据就不许编，故默认关闭</text>
+            </g>
+
+            <!-- 便签：右中（答案缓存） -->
+            <g>
+              <rect x="912" y="218" width="236" height="68" rx="8" fill="#fdf4c6" stroke="#e6cf7e" stroke-width="1.1"/>
+              <text x="924" y="238" font-size="10.5" font-weight="700" fill="#8a6a12">答案缓存 · 命中即返回</text>
+              <text x="924" y="255" font-size="9.4" fill="#7a5c0e">· 只缓存 L1–L3，L4 不缓存</text>
+              <text x="924" y="271" font-size="9.4" fill="#7a5c0e">· 精确 / 近似命中 · LRU + TTL</text>
+            </g>
+
+            <!-- 连线：中轴竖排主线（照参考图画法：重试走左侧回路，降级走左下，END 在右下） -->
+            <path fill="none" d="M580,56 L580,72" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <path fill="none" d="M580,132 L580,148" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <path fill="none" d="M580,222 L580,238" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <path fill="none" d="M580,296 L580,312" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <!-- 充分：菱形右顶点 → 右行 → 下入 generate 顶部（同参考图「是」画法） -->
+            <path fill="none" d="M700,392 L820,392 L820,472" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <path fill="none" d="M820,532 L820,552" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <path fill="none" d="M820,610 L820,624" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <path fill="none" d="M940,700 L996,700" stroke="#5b6b7d" stroke-width="1.4" marker-end="url(#ar)"/>
+            <!-- 检索重试回路（左）：grade 判不足且未到上限 → 换措辞回 rewrite -->
+            <path fill="none" d="M460,392 L340,392 L340,104 L446,104" stroke="#8b5cf6" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#arP)"/>
+            <!-- 降级：grade 到上限（菱形下方顶点出）→ 左行 → 垂直下入 fallback 顶部 -->
+            <path fill="none" d="M580,468 L580,502 L290,502 L290,526" stroke="#b07a3a" stroke-width="1.5" marker-end="url(#arB)"/>
+            <path fill="none" d="M410,562 L636,562 L636,504 L656,504" stroke="#b07a3a" stroke-width="1.5" marker-end="url(#arB)"/>
+            <!-- 校验不通过：底部顶点出 → 降级标记后汇入 END（不重写） -->
+            <path fill="none" d="M820,772 L820,812 L1080,812 L1080,722" stroke="#b07a3a" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#arB)"/>
+
+            <!-- 分支标签 -->
+            <text x="744" y="384" text-anchor="middle" font-size="9.4" font-weight="700" fill="#15803d" stroke="#ffffff" stroke-width="3" paint-order="stroke">充分</text>
+            <text x="400" y="384" text-anchor="middle" font-size="9.2" fill="#7c3aed" stroke="#ffffff" stroke-width="3" paint-order="stroke">否 · 不足且未到上限</text>
+            <text x="435" y="494" text-anchor="middle" font-size="9.2" fill="#a16207" stroke="#ffffff" stroke-width="3" paint-order="stroke">否 · 到上限</text>
+            <text x="520" y="552" text-anchor="middle" font-size="9.1" fill="#a16207" stroke="#ffffff" stroke-width="3" paint-order="stroke">降级后仍进入生成</text>
+            <text x="968" y="690" text-anchor="middle" font-size="9.4" font-weight="700" fill="#15803d" stroke="#ffffff" stroke-width="3" paint-order="stroke">通过</text>
+            <text x="950" y="804" text-anchor="middle" font-size="9.2" fill="#a16207" stroke="#ffffff" stroke-width="3" paint-order="stroke">不通过 · 降级标记 L4 · 保留首版正文</text>
+
+            <!-- 节点：START -->
+            <g filter="url(#ns)">
+              <rect x="490" y="16" width="180" height="40" rx="20" fill="#dbeafe" stroke="#5b8fd6" stroke-width="1.3"/>
+              <text x="580" y="41" text-anchor="middle" font-size="11.5" font-weight="700" fill="#14538f">START · 用户提问</text>
+            </g>
+
+            <!-- rewrite -->
+            <g filter="url(#ns)">
+              <rect x="450" y="76" width="260" height="56" rx="8" fill="#e0f6e8" stroke="#a3d8b9" stroke-width="1.2"/>
+              <text x="580" y="100" text-anchor="middle" font-size="12.2" font-weight="700" fill="#0e6b3b">rewrite · 改写查询</text>
+              <text x="580" y="120" text-anchor="middle" font-size="9.8" fill="#5b6b7b">首轮原样透传 · 重试轮叠加规则书措辞</text>
+            </g>
+
+            <!-- retrieve -->
+            <g filter="url(#ns)">
+              <rect x="430" y="152" width="300" height="70" rx="8" fill="#e0f6e8" stroke="#a3d8b9" stroke-width="1.2"/>
+              <text x="580" y="176" text-anchor="middle" font-size="12.2" font-weight="700" fill="#0e6b3b">retrieve · 分层检索 L1 → L4</text>
+              <text x="580" y="195" text-anchor="middle" font-size="9.6" fill="#5b6b7b">pgvector（HNSW）+ BM25 → 加权融合（score）</text>
+              <text x="580" y="211" text-anchor="middle" font-size="9.6" fill="#5b6b7b">gte-rerank-v2 精排 → 父块回填（管线细节见 ③）</text>
+            </g>
+
+            <!-- grade 节点 -->
+            <g filter="url(#ns)">
+              <rect x="430" y="242" width="300" height="54" rx="8" fill="#e0f6e8" stroke="#a3d8b9" stroke-width="1.2"/>
+              <text x="580" y="265" text-anchor="middle" font-size="12.2" font-weight="700" fill="#0e6b3b">grade · 相关性评分</text>
+              <text x="580" y="285" text-anchor="middle" font-size="9.6" fill="#5b6b7b">命中所问对象才算充分 · L2/L3 必走 LLM 裁判</text>
+            </g>
+
+            <!-- 资料是否充分？ -->
+            <g filter="url(#ns)">
+              <polygon points="580,316 700,392 580,468 460,392" fill="#fde2ec" stroke="#eea9c3" stroke-width="1.3"/>
+              <text x="580" y="388" text-anchor="middle" font-size="11.8" font-weight="700" fill="#9d174d">资料是否充分？</text>
+              <text x="580" y="405" text-anchor="middle" font-size="9.2" fill="#a05a72">L1 规则为主 · L2/L3 LLM 裁判</text>
+            </g>
+
+            <!-- generate -->
+            <g filter="url(#ns)">
+              <rect x="660" y="476" width="320" height="56" rx="8" fill="#e0f6e8" stroke="#a3d8b9" stroke-width="1.2"/>
+              <text x="820" y="499" text-anchor="middle" font-size="11.8" font-weight="700" fill="#0e6b3b">generate · 带引用生成</text>
+              <text x="820" y="517" text-anchor="middle" font-size="9.4" fill="#5b6b7b">LCEL 流式 · SSE 逐字输出</text>
+            </g>
+
+            <!-- check 节点 -->
+            <g filter="url(#ns)">
+              <rect x="660" y="556" width="320" height="54" rx="8" fill="#e0f6e8" stroke="#a3d8b9" stroke-width="1.2"/>
+              <text x="820" y="578" text-anchor="middle" font-size="12.2" font-weight="700" fill="#0e6b3b">check · 幻觉校验</text>
+              <text x="820" y="597" text-anchor="middle" font-size="9.6" fill="#5b6b7b">事实核查 · LLM 裁判（资料 / 上轮对话）</text>
+            </g>
+
+            <!-- 答案是否可交付？ -->
+            <g filter="url(#ns)">
+              <polygon points="820,628 940,700 820,772 700,700" fill="#fde2ec" stroke="#eea9c3" stroke-width="1.3"/>
+              <text x="820" y="696" text-anchor="middle" font-size="11.8" font-weight="700" fill="#9d174d">答案是否可交付？</text>
+              <text x="820" y="713" text-anchor="middle" font-size="9.2" fill="#a05a72">LLM 裁判 · 不重写，就地降级标注</text>
+            </g>
+
+            <!-- END -->
+            <g filter="url(#ns)">
+              <rect x="1000" y="668" width="160" height="48" rx="24" fill="#d6f2ea" stroke="#6fbda8" stroke-width="1.3"/>
+              <text x="1080" y="696" text-anchor="middle" font-size="11" font-weight="700" fill="#0f5f52">END · SSE 完成</text>
+            </g>
+
+            <!-- fallback -->
+            <g filter="url(#ns)">
+              <rect x="170" y="530" width="240" height="64" rx="8" fill="#fdf1e3" stroke="#dcb98a" stroke-width="1.2"/>
+              <text x="290" y="556" text-anchor="middle" font-size="11.8" font-weight="700" fill="#8a5a1c">fallback · 降级兜底</text>
+              <text x="290" y="576" text-anchor="middle" font-size="9.4" fill="#7e6a52">清空引用 · 统一标记 L4「未验证」</text>
+            </g>
+
+            <!-- 底部说明 -->
+            <g>
+              <rect x="150" y="866" width="860" height="64" rx="8" fill="#fdf4c6" stroke="#e6cf7e" stroke-width="1.1"/>
+              <text x="164" y="886" font-size="9.7" fill="#7a5c0e">check 不通过 → 不重生成（首版已流式输出）：保留正文，改标 L4「模型知识补充」；check_passed=false 随 done 回传供评测。</text>
+              <text x="164" y="903" font-size="9.7" fill="#7a5c0e">fallback 路径不生成引用，answer 统一标记 L4「未验证」。图外后处理：回答开头自报未收录 → 联网补充重答，标注「站外检索补充」。</text>
+              <text x="164" y="920" font-size="9.7" fill="#7a5c0e">全图无重写回路：检索重试 ≤3 轮发生在 grade 之前；check 只判一次、不回流生成（流式下重播体验差，为代码中有记录的有意取舍）。</text>
+            </g>
+          </svg>
+        </div>
+        <div class="legend">
+          <span class="lg"><span class="sw sw-b"></span>入口 / 出口</span>
+          <span class="lg"><span class="sw sw-g"></span>处理节点（复用现有检索 / 生成函数）</span>
+          <span class="lg"><span class="sw sw-p"></span>判定节点（条件边）</span>
+          <span class="lg"><span class="sw sw-o"></span>降级兜底节点</span>
+          <span class="lg"><span class="sw sw-n"></span>设计约束 / 降级说明</span>
+          <span class="lg">紫色虚线 = 检索重试（≤3 轮）　棕色实线 = fallback 汇入生成　棕色虚线 = 校验不通过 · 降级标记　橙色虚线框 = 与 ③ 的复用关系</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ ⑤ 记忆 · 评测 · 配置 ============ -->
+    <section class="sec">
+      <div class="sec-head">
+        <span class="num">5</span>
+        <span class="sec-title">记忆 · 评测 · 配置闭环（P3 / P4）</span>
+        <span class="sec-sub">个性化记忆、四维质量门禁与运行时调参，构成可持续迭代的工程闭环</span>
+      </div>
+      <div class="sec-body">
+        <div class="grid-3">
+          <div class="col">
+            <div class="col-head">分层记忆与个性化<span>Memory</span></div>
+            <ul class="mini">
+              <li><b>ChatSession / ChatMessage</b>：短期会话与引用快照</li>
+              <li><b>UserProfile</b>：蒸馏后的结构化偏好，每用户一行</li>
+              <li><b>UserMemoryEpisode</b>：按时间追加的情景事件</li>
+              <li><b>AnswerFeedback</b>：答案级「有用 / 没用」反馈</li>
+              <li>推荐 / 问答前注入画像与近期情景；回复后异步蒸馏（fire-and-forget，失败不影响主回复）</li>
+              <li>语义记忆（规则向量）与个性化记忆分开存、分开取</li>
+            </ul>
+            <div class="kpi"><span>AsyncPostgresStore 跨轮对话状态</span><span>话题游戏 / 实体上下文补全</span></div>
+          </div>
+          <div class="col">
+            <div class="col-head">RAG 四维评测中心<span>P3</span></div>
+            <ul class="mini">
+              <li><b>EvalCase</b>：问题 + 标准答案 + 可选标准切片</li>
+              <li><b>EvalRunner</b>：复用线上真实链路（检索 → 生成 → 裁判）</li>
+              <li><b>LLM-as-judge</b>：四维打分，温度默认 0</li>
+              <li><b>EvalRun / EvalResult</b>：批次均值、通过率、检索层级分布</li>
+              <li>默认按总分升序排列，直接定位 badcase</li>
+              <li>批次冗余保存问答快照与配置快照，可回归对比</li>
+            </ul>
+            <div class="kpi">
+              <span>Context Recall</span><span>Context Precision</span><span>Faithfulness</span><span>Answer Relevance</span><span>overall ≥ 0.6</span>
+            </div>
+          </div>
+          <div class="col">
+            <div class="col-head">运行时配置中心<span>P4</span></div>
+            <ul class="mini">
+              <li>白名单参数：融合方式 / 权重 / rerank / HyDE / 父块 / 模型 / 评测阈值</li>
+              <li>数据库只存被改过的键，其余继续读 <b>.env</b></li>
+              <li>保存后即时作用于当前进程，无需重启</li>
+              <li><b>AppConfigAudit</b>：操作人 / 旧值 / 新值，一键回滚</li>
+              <li>API Key、DATABASE_URL 等敏感项只走 <b>.env</b></li>
+              <li>当前面向单进程部署；多副本需额外同步</li>
+            </ul>
+            <div class="kpi"><span>改配置 → 跑同一题库 → 对比四维分 → 保留或回滚</span></div>
+          </div>
+        </div>
+        <div class="closing">评测批次随附配置快照（融合方式 / 重排方式 / 模型 / Top-K），因此调参后的效果可复现、可比较、可回滚。</div>
+      </div>
+    </section>
+
+    <!-- ============ ⑥ 底座 ============ -->
+    <section class="sec">
+      <div class="sec-head">
+        <span class="num">6</span>
+        <span class="sec-title">存储 · 模型 · 质量底座</span>
+        <span class="sec-sub">数据持久化、外部模型与质量约束</span>
+      </div>
+      <div class="sec-body">
+        <div class="grid-4">
+          <svg class="cylsvg" viewBox="0 0 280 190" role="img" aria-label="PostgreSQL 16 + pgvector 0.8.7 数据库">
+            <path d="M8,18 L8,156 A132,13 0 0 0 272,156 L272,18 Z" fill="#fbf3d0" stroke="#dfc878" stroke-width="1.3"/>
+            <ellipse cx="140" cy="18" rx="132" ry="13" fill="#fdf6d8" stroke="#dfc878" stroke-width="1.3"/>
+            <foreignObject x="22" y="36" width="236" height="126">
+              <div xmlns="http://www.w3.org/1999/xhtml" class="cylobj">
+                <div class="t">PostgreSQL 16 + pgvector 0.8.7</div>
+                <div class="s">HNSW 余弦索引（m=16 / ef=64）· 19 个 Alembic 迁移 · 29 张 ORM 表（用户 / 桌游 / 社区 / 会话 / 记忆 / 评测 / 配置）</div>
+              </div>
+            </foreignObject>
+          </svg>
+          <svg class="cylsvg" viewBox="0 0 280 190" role="img" aria-label="Redis 热点答案缓存持久层">
+            <path d="M8,18 L8,156 A132,13 0 0 0 272,156 L272,18 Z" fill="#e3eefb" stroke="#9cbde0" stroke-width="1.3"/>
+            <ellipse cx="140" cy="18" rx="132" ry="13" fill="#ecf3fc" stroke="#9cbde0" stroke-width="1.3"/>
+            <foreignObject x="22" y="36" width="236" height="126">
+              <div xmlns="http://www.w3.org/1999/xhtml" class="cylobj blue">
+                <div class="t">Redis · 热点答案缓存持久层</div>
+                <div class="s">内存 LRU 作热层（近似命中 embedding 扫描），Redis 持久化（进程重启不丢、多 worker 共享，TTL 兜底）；不可用时自动回落内存。跨轮对话状态由 LangGraph AsyncPostgresStore 持久化</div>
+              </div>
+            </foreignObject>
+          </svg>
+          <div class="base by">
+            <div class="t">模型 · DeepSeek + 百炼 DashScope</div>
+            <div class="s">deepseek-v4-pro（主）→ deepseek-flash（降级链）· text-embedding-v1 · gte-rerank-v2 · qwen-vl-ocr · LLM 超时 90s</div>
+          </div>
+          <div class="base bg">
+            <div class="t">质量 · 约束与门禁</div>
+            <div class="s">零数据虚构 · L1–L4 引用分层 · hit@5 ≈ 96% · LLM-as-judge 四维 · 通过率 ≥ 0.6 · 任何 LLM 失败不空答</div>
+          </div>
+        </div>
+        <div class="foot">TableMind · 系统架构图 · 依据仓库当前代码与 README 绘制（前端 React 18 / 后端 FastAPI / 向量库 pgvector）</div>
+      </div>
+    </section>
+
+  </div>
+</div>
+</body>
+</html>

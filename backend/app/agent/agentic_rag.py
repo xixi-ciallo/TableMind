@@ -17,11 +17,14 @@
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import re
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
+from time import perf_counter
 from typing import Any, TypedDict
 
 from langgraph.config import get_stream_writer
@@ -30,6 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import llm, rule_qa
 from app.core.config import settings
+from app.core.database import async_session_factory
+from app.models.agent_trace import AgentRun, AgentStep
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +91,126 @@ def _emit(kind: str, payload: dict | None = None, **extra: Any) -> None:
         pass
 
 
+# ---- 节点级执行轨迹（agent_run / agent_step 落库）----
+# 参考架构要求「每个节点都落一条 agent_step：节点名/入参/出参/状态/耗时」，
+# 用于 badcase 的逐节点回放。轨迹先在内存收集，run 结束时用独立短会话一次性
+# 写入（不占用请求会话的事务）；入参/出参只存截断摘要，避免大文本撑表。
+_trace_ctx: ContextVar[_Trace | None] = ContextVar("agentic_rag_trace", default=None)
+
+
+def _snap_state(state: RAGState) -> dict:
+    """节点入参投影：小字段原样，大文本只留长度。"""
+    return {
+        "message": (state.get("message") or "")[:160],
+        "query": (state.get("query") or "")[:160],
+        "retrieval_attempts": state.get("retrieval_attempts"),
+        "check_attempts": state.get("check_attempts"),
+        "level": state.get("level"),
+        "label": state.get("label"),
+        "grade": state.get("grade"),
+        "fallback": state.get("fallback"),
+        "context_len": len(state.get("context") or ""),
+        "answer_len": len(state.get("answer") or ""),
+        "citations": len(state.get("citations") or []),
+    }
+
+
+def _snap_output(result: dict | None) -> dict:
+    out: dict = {}
+    for key, value in (result or {}).items():
+        if isinstance(value, str):
+            out[key] = value[:160] + ("…" if len(value) > 160 else "")
+        elif isinstance(value, list):
+            out[key] = {"count": len(value)}
+        else:
+            out[key] = value
+    return out
+
+
+class _Trace:
+    """一次运行的节点轨迹缓存；结束时统一落库，失败不影响主流程。"""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.t0 = perf_counter()
+        self.steps: list[dict] = []
+        self.summary: dict = {}
+
+    def add(
+        self, node: str, status: str, duration_ms: int, inp: dict, out: dict
+    ) -> None:
+        self.steps.append(
+            {
+                "seq": len(self.steps) + 1,
+                "node": node,
+                "status": status,
+                "duration_ms": duration_ms,
+                "input": inp,
+                "output": out,
+            }
+        )
+
+    async def flush(self, status: str = "ok", error: str | None = None) -> None:
+        if not settings.AGENTIC_TRACE_ENABLED:
+            return
+        try:
+            async with async_session_factory() as db:
+                run = AgentRun(
+                    message=self.message[:2000],
+                    level=self.summary.get("level"),
+                    fallback=bool(self.summary.get("fallback")),
+                    check_passed=self.summary.get("check_passed"),
+                    external=bool(self.summary.get("external")),
+                    chars=self.summary.get("chars"),
+                    status=status,
+                    error=error,
+                    duration_ms=int((perf_counter() - self.t0) * 1000),
+                    node_count=len(self.steps),
+                )
+                db.add(run)
+                await db.flush()
+                for step in self.steps:
+                    db.add(AgentStep(run_id=run.id, **step))
+                await db.commit()
+        except Exception as e:  # noqa: BLE001 - 观测设施绝不影响主流程
+            log.warning("agent 轨迹落库失败：%s", e)
+
+
+def _traced(node: str):
+    """节点装饰器：为每个图节点记录一条 agent_step（名称/入参/出参/状态/耗时）。"""
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(state: RAGState) -> dict:
+            trace = _trace_ctx.get()
+            if trace is None:
+                return await fn(state)
+            t0 = perf_counter()
+            try:
+                result = await fn(state)
+            except Exception as e:  # noqa: BLE001
+                trace.add(
+                    node,
+                    "error",
+                    int((perf_counter() - t0) * 1000),
+                    _snap_state(state),
+                    {"error": f"{type(e).__name__}: {e}"[:160]},
+                )
+                raise
+            trace.add(
+                node,
+                "ok",
+                int((perf_counter() - t0) * 1000),
+                _snap_state(state),
+                _snap_output(result),
+            )
+            return result
+
+        return wrapper
+
+    return deco
+
+
 # 检索重试时逐次加不同的规则书措辞；只改查询，不改主题游戏。
 _RETRY_SUFFIXES = (
     "",
@@ -95,6 +220,7 @@ _RETRY_SUFFIXES = (
 )
 
 
+@_traced("rewrite")
 async def _rewrite(state: RAGState) -> dict:
     """第一次用原问题；之后按重试次数叠加规则书措辞。"""
     attempts = int(state.get("retrieval_attempts", 0))
@@ -106,6 +232,7 @@ async def _rewrite(state: RAGState) -> dict:
     return {"query": query, "retrieval_attempts": attempts + 1}
 
 
+@_traced("retrieve")
 async def _retrieve(state: RAGState) -> dict:
     """分层检索，并把层级与引用片段发给前端。"""
     level, context, game, citations = await rule_qa.retrieve_layered_with_citations(
@@ -179,6 +306,10 @@ _EXTERNAL_MISS_PAT = re.compile(
     r"未在.*(?:出现|收录)|不在.*候选池|本站未收录"
 )
 
+# 站外补充成功后追加在答案末尾的免责声明：明确这段内容的来源与性质。
+# 以 delta 形式随正文下发——前端展示与 ChatMessage 落库（reply=chunks 拼接）都包含它。
+_EXTERNAL_DISCLAIMER = "\n\n（本站资料中没有相关资料，以上内容来自站外公开资料，仅供参考）"
+
 
 def _parse_json(raw: str) -> dict:
     text = (raw or "").strip()
@@ -245,6 +376,7 @@ async def _llm_grade(message: str, context: str) -> bool:
     return _as_bool(_parse_json(raw), "sufficient", True)
 
 
+@_traced("grade")
 async def _grade(state: RAGState) -> dict:
     """判断检索结果是否足以生成；L2 规则书命中即视为充分。"""
     level = int(state.get("level", 4))
@@ -273,6 +405,7 @@ async def _grade(state: RAGState) -> dict:
     return {"grade": "exhausted"}
 
 
+@_traced("generate")
 async def _generate(state: RAGState) -> dict:
     """流式生成；token 通过 custom 事件发出。"""
     db = _db()
@@ -362,6 +495,7 @@ async def _llm_check(
     return _as_bool(obj, "supported", True), str(obj.get("reason") or "")[:200]
 
 
+@_traced("check")
 async def _check(state: RAGState) -> dict:
     """生成后核查；不通过则清空上一版并重生成，到上限则追加提示。"""
     if not settings.AGENTIC_CHECK_ENABLED or state.get("fallback"):
@@ -404,6 +538,7 @@ async def _check(state: RAGState) -> dict:
     }
 
 
+@_traced("fallback")
 async def _fallback(state: RAGState) -> dict:
     """检索重试到上限：明确降级，清空引用并改标 L4。"""
     label = rule_qa.LEVEL_LABEL[4]
@@ -501,6 +636,8 @@ async def run_agentic_stream(
     }
 
     token = _db_ctx.set(db)
+    trace = _Trace(message)
+    t_trace = _trace_ctx.set(trace)
     final: dict = {}
     # 只有回答**开头**就在说「本站暂无 / 未收录」时才需要站外补一次，而这种自述
     # 一定出现在最初几十字内。因此只暂扣开头 HEAD_GATE 字做判定：
@@ -544,8 +681,16 @@ async def run_agentic_stream(
                     )
             elif stream_mode == "values":
                 final = chunk
+    except GeneratorExit:
+        # 客户端提前断开：节点轨迹已收齐，标记中止后落一份
+        await trace.flush("aborted")
+        raise
+    except BaseException as e:  # noqa: BLE001 - 只为记录轨迹，异常原样上抛
+        await trace.flush("error", f"{type(e).__name__}: {e}"[:200])
+        raise
     finally:
         _db_ctx.reset(token)
+        _trace_ctx.reset(t_trace)
 
     level = int(final.get("level", 4))
     answer = final.get("answer") or ""
@@ -639,7 +784,6 @@ async def run_agentic_stream(
         # 站外也没查到时不能把「未找到」当答案顶掉站内回答
         if extra_text and not extra_dead and not _EXTERNAL_MISS_PAT.search(extra_text):
             external = True
-            answer = extra_text
             if not extra_streaming:
                 # 极短结果（不足 EXTRA_GATE）才会走到这里，补发一次
                 yield "level", json.dumps(
@@ -653,6 +797,9 @@ async def run_agentic_stream(
                 )
                 for i in range(0, len(extra_text), 40):
                     yield "delta", extra_text[i : i + 40]
+            # 结尾免责声明：站外内容未经本站规则书核对，明确告知来源与性质
+            answer = extra_text + _EXTERNAL_DISCLAIMER
+            yield "delta", _EXTERNAL_DISCLAIMER
         else:
             # 站外没查到：把暂扣的站内回答补放出来，避免空答
             if not extra_streaming:
@@ -669,6 +816,13 @@ async def run_agentic_stream(
             yield "delta", piece
         held.clear()
 
+    trace.summary = {
+        "level": level,
+        "fallback": bool(final.get("fallback")),
+        "check_passed": bool(final.get("check_passed", True)),
+        "external": external,
+        "chars": len(answer),
+    }
     yield "done", json.dumps(
         {
             "level": level,
@@ -684,3 +838,5 @@ async def run_agentic_stream(
         },
         ensure_ascii=False,
     )
+    # 正常跑完（done 已被消费），落一份成功轨迹
+    await trace.flush("ok")
